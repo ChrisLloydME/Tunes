@@ -12,7 +12,6 @@ final class SamplyBackend {
     let uploader: SamplyUploader
     private(set) var library: [LibraryItem] = []
     private(set) var boxes: [WebBox] = []
-    private(set) var versions: [WebBox] = []
     private(set) var selectedItem: LibraryItem?
     private(set) var folderPath: [WebBox] = []
     private(set) var isBrowsing = false
@@ -90,14 +89,12 @@ final class SamplyBackend {
     func openFolder(_ box: WebBox) {
         guard box.kind == "folder", let item = selectedItem else { return }
         folderPath.append(box)
-        versions = []
         browse(item: item, groupID: box.id)
     }
 
     func goUp() {
         guard !folderPath.isEmpty, let item = selectedItem else { return }
         folderPath.removeLast()
-        versions = []
         browse(item: item, groupID: folderPath.last?.id)
     }
 
@@ -126,13 +123,12 @@ final class SamplyBackend {
         }
     }
 
-    func showVersions(_ box: WebBox) async {
+    func versions(for box: WebBox) async throws -> [WebBox] {
         let generation = selectionGeneration
-        do {
-            let items: [WebBox] = try await web.call("versions", arguments: ["fileID": box.id])
-            guard generation == selectionGeneration else { return }
-            versions = items
-        } catch { self.error = error.localizedDescription }
+        let items: [WebBox] = try await web.call("versions", arguments: ["fileID": box.id])
+        try Task.checkCancellation()
+        guard generation == selectionGeneration else { throw CancellationError() }
+        return items
     }
 
     func play(_ box: WebBox) {
@@ -217,7 +213,6 @@ final class SamplyBackend {
         playTask?.cancel()
         selectedItem = nil
         boxes = []
-        versions = []
         folderPath = []
         isBrowsing = false
         isPlayingSelection = false

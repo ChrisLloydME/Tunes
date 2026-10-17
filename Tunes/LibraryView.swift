@@ -18,7 +18,7 @@ struct LibraryView: View {
         Group {
             if items.isEmpty {
                 ContentUnavailableView("Your Library Is Empty", systemImage: "square.stack",
-                                       description: Text("Your projects and shared music will appear here."))
+                                       description: Text("Your albums will appear here."))
             } else if filteredItems.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else {
@@ -34,7 +34,7 @@ struct LibraryView: View {
                                         .lineLimit(2)
                                         .multilineTextAlignment(.leading)
                                         .frame(width: 160, alignment: .topLeading)
-                                    Text(item.artist.flatMap { $0.isEmpty ? nil : $0 } ?? "Project")
+                                    Text(item.artist.flatMap { $0.isEmpty ? nil : $0 } ?? "Album")
                                         .font(.system(size: 11))
                                         .foregroundStyle(.secondary)
                                         .lineLimit(1)

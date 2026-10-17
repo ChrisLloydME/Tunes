@@ -60,7 +60,6 @@ struct ContentView: View {
                     Button { Task { await backend.refreshLibrary() } } label: { Image(systemName: "arrow.clockwise") }
                         .help("Refresh Library")
                         .accessibilityLabel("Refresh Library")
-                    Button("Samply Window", systemImage: "macwindow") { backend.web.showWindow() }
                     Button("Connection Settings", systemImage: "gearshape") { showConnection = true }
                 }
             }
@@ -78,7 +77,7 @@ struct ContentView: View {
             ContentUnavailableView {
                 Label("Connect to Samply", systemImage: "waveform")
             } description: {
-                Text("Sign in to browse your projects and shared music.")
+                Text("Sign in to listen to your music.")
             } actions: {
                 VStack(spacing: 20) {
                     Button("Sign In to Samply") { backend.web.showWindow() }
@@ -89,7 +88,9 @@ struct ContentView: View {
                 }
             }
         } else if showsProject, let item = backend.selectedItem {
-            projectContent(item)
+            AlbumDetailView(backend: backend, item: item) {
+                if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
+            }
         } else if !backend.libraryReady {
             ProgressView("Loading your Samply library…")
         } else {
@@ -97,85 +98,6 @@ struct ContentView: View {
                 backend.select(item)
                 showsProject = true
             }
-        }
-    }
-
-    private func projectContent(_ item: LibraryItem) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .bottom, spacing: 24) {
-                ProjectArtwork(artwork: item.artwork, size: 160)
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(backend.folderPath.last?.name ?? item.name)
-                        .font(.system(size: 28, weight: .bold)).lineLimit(3)
-                        .textSelection(.enabled)
-                    if let artist = item.artist, !artist.isEmpty {
-                        Text(artist).font(.title3).foregroundStyle(.secondary)
-                    }
-                    if !backend.folderPath.isEmpty {
-                        Text(item.name).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    if item.canUpload {
-                        Button("Upload File", systemImage: "square.and.arrow.up") {
-                            if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
-                        }
-                        .padding(.top, 8)
-                        .disabled(backend.uploader.isRunning || backend.isBrowsing)
-                    }
-                }
-                Spacer(minLength: 0)
-            }.padding(24)
-            Divider().padding(.horizontal, 24)
-            if backend.isBrowsing {
-                ProgressView("Loading project…").frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if backend.boxes.isEmpty {
-                ContentUnavailableView("No Files to Display", systemImage: "folder",
-                                       description: Text("Open the Samply window to check access to this project."))
-            } else {
-                List {
-                    ForEach(backend.boxes) { box in boxRow(box, isVersion: false) }
-                    if !backend.versions.isEmpty {
-                        Section("Versions") {
-                            ForEach(backend.versions) { box in boxRow(box, isVersion: true) }
-                        }
-                    }
-                }.listStyle(.inset)
-            }
-        }
-        .disabled(backend.isPlayingSelection)
-    }
-
-    private func boxRow(_ box: WebBox, isVersion: Bool) -> some View {
-        HStack(spacing: 12) {
-            Button {
-                if box.kind == "folder" { backend.openFolder(box) }
-                else { backend.play(box) }
-            } label: {
-                Image(systemName: box.kind == "folder" ? "folder" : box.kind == "stack" ? "square.stack" : box.isAudio ? "play.fill" : "doc")
-                    .frame(width: 24)
-            }
-            .buttonStyle(.borderless)
-            .accessibilityLabel(box.kind == "folder" ? "Open Folder" : "Play")
-            .disabled(box.kind != "folder" && (!box.isAudio || box.isProcessing))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(box.name).lineLimit(1)
-                if box.isProcessing { Text("Processing in Samply…").font(.caption).foregroundStyle(.secondary) }
-                else if isVersion, let name = box.versionName { Text(name).font(.caption).foregroundStyle(.secondary) }
-            }
-            if backend.playback.state.fileID == (box.activeID ?? box.id) {
-                Image(systemName: "waveform").foregroundStyle(.tint).accessibilityLabel("Current Track")
-            }
-            Spacer()
-            if let duration = box.duration { Text(time(duration)).monospacedDigit().foregroundStyle(.secondary) }
-            if box.kind == "stack", !box.childIDs.isEmpty {
-                Button("Versions (\(box.childIDs.count))") { Task { await backend.showVersions(box) } }
-                    .buttonStyle(.borderless)
-            }
-        }
-        .padding(.vertical, 7)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            if box.kind == "folder" { backend.openFolder(box) }
-            else { backend.play(box) }
         }
     }
 
@@ -200,8 +122,4 @@ struct ContentView: View {
         }
     }
 
-    private func time(_ value: Double) -> String {
-        let seconds = value.isFinite ? Int(max(0, min(value, 864000))) : 0
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
 }
