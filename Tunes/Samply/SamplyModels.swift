@@ -73,6 +73,10 @@ struct WebPlayback: Codable, Equatable, Sendable {
                                   canGoNext: false, canGoPrevious: false)
 }
 
+enum WebAuthenticationState: String, Codable, Sendable {
+    case checking, signedIn, signedOut
+}
+
 struct WebSnapshot: Codable, Sendable {
     struct Account: Codable, Equatable, Sendable {
         let uid: String
@@ -80,6 +84,12 @@ struct WebSnapshot: Codable, Sendable {
     }
     let version: Int
     var account: Account?
+    var authentication: WebAuthenticationState?
+    var authenticationState: WebAuthenticationState {
+        if account != nil { return .signedIn }
+        // Old or incomplete adapter snapshots cannot prove that the session expired.
+        return authentication == .signedOut ? .signedOut : .checking
+    }
     let libraryReady: Bool
     let library: [LibraryItem]
     var routeID: String?

@@ -55,6 +55,22 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
+test('session restoration stays checking until a real or anonymous identity resolves', async () => {
+    const f = fixture();
+    f.stores.delete('profile-auth-module');
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'checking');
+    f.stores.set('profile-auth-module', {isAnonymous: false});
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'checking');
+    f.stores.set('profile-auth-module', {isAnonymous: true});
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'checking');
+    f.stores.set('profile-auth-module', f.auth);
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'signedIn');
+    f.auth.isAnonymous = true;
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'signedOut');
+    f.auth.isAnonymous = false;
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'signedIn');
+});
+
 // Samply normally invokes this callback from requestAnimationFrame, which WebKit
 // can suspend while the app-owned web window is hidden. No animation frames run here.
 function installMediaClock(f, {gapless = false} = {}) {

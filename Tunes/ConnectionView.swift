@@ -12,13 +12,17 @@ struct ConnectionView: View {
             Text("Connect to Samply").font(.title2.weight(.semibold))
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(backend.isConnected ? "Signed in to Samply" : "Sign in to your Samply account").font(.headline)
-                    Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
-                        .foregroundStyle(.secondary)
-                    Button(backend.isConnected ? "Open Samply Window" : "Sign In to Samply") { backend.web.showWindow() }
-                    if !backend.isConnected {
-                        Divider()
-                        EmailSignInLinkView(session: backend.web)
+                    if backend.isCheckingSession {
+                        ProgressView("Loading your Samply session…")
+                    } else {
+                        Text(backend.isConnected ? "Signed in to Samply" : "Sign in to your Samply account").font(.headline)
+                        Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
+                            .foregroundStyle(.secondary)
+                        Button(backend.isConnected ? "Open Samply Window" : "Sign In to Samply") { backend.web.showWindow() }
+                        if !backend.isConnected {
+                            Divider()
+                            EmailSignInLinkView(session: backend.web)
+                        }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }

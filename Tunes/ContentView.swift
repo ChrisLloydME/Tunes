@@ -73,7 +73,9 @@ struct ContentView: View {
     }
 
     @ViewBuilder private var mainContent: some View {
-        if !backend.isConnected {
+        if backend.isCheckingSession {
+            ProgressView("Loading your Samply session…")
+        } else if !backend.isConnected {
             ContentUnavailableView {
                 Label("Connect to Samply", systemImage: "waveform")
             } description: {

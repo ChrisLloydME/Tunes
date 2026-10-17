@@ -9,6 +9,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     private(set) var snapshot: WebSnapshot?
     private(set) var connectionError: String?
     private(set) var isSigningOut = false
+    private(set) var authenticationState: WebAuthenticationState = .checking
     @ObservationIgnored let webView: WKWebView
     @ObservationIgnored private var window: NSWindow?
     @ObservationIgnored private var popupWindows: [NSWindow] = []
@@ -45,6 +46,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     func start() {
         guard !hasStarted, !isSigningOut else { return }
         hasStarted = true
+        authenticationState = .checking
         // Keep the same WKWebView attached to an app-owned window even when ordered out.
         // Login and background playback therefore share one media engine and website session.
         makeWindowIfNeeded()
@@ -69,6 +71,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard snapshot?.account == nil else { throw EmailSignInLinkError.alreadyConnected }
         let url = try SamplyEmailSignInLink.parse(input)
         generation += 1
+        authenticationState = .checking
         connectionError = nil
         // Loading in this WebView preserves Samply's emailForSignIn and existing auth state.
         // Do not preflight the one-time link or send it through a separate URLSession.
@@ -99,6 +102,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             // A newer/different contract must never silently drive the native library.
             guard state.version == 1 else { throw SamplyError.invalidResponse }
             snapshot = state
+            authenticationState = state.authenticationState
             connectionError = nil
         } catch {
             guard generation == stamp else { return }
@@ -122,6 +126,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
 
     func signOut() async {
         isSigningOut = true
+        authenticationState = .checking
         generation += 1
         snapshot = nil
         connectionError = nil
@@ -133,6 +138,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         // Remove IndexedDB (Firebase auth), cookies, caches and service workers together.
         await dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
         hasStarted = false
+        authenticationState = .signedOut
         isSigningOut = false
         window?.orderOut(nil)
     }
@@ -158,6 +164,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         generation += 1
         snapshot = nil
+        authenticationState = .checking
         connectionError = "The Samply web process stopped. Reloading…"
         webView.reload()
     }

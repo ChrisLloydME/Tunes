@@ -39,6 +39,7 @@ final class SamplyBackend {
     }
 
     var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
+    var isCheckingSession: Bool { web.authenticationState == .checking }
     var libraryReady: Bool { web.snapshot?.libraryReady == true }
 
     func start() {
@@ -59,7 +60,7 @@ final class SamplyBackend {
     }
 
     private func acceptSnapshot() {
-        guard let state = web.snapshot else { return }
+        guard let state = web.snapshot, state.authenticationState != .checking else { return }
         let newAccount = state.account?.uid
         if newAccount != accountID {
             invalidateSelection()

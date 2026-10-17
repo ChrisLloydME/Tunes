@@ -29,6 +29,13 @@
         if (!auth?.uid || auth.isAnonymous !== false) return null;
         return { uid: auth.uid, name: text(auth.userSnippet?.displayName) };
     }
+    function authenticationState(auth) {
+        if (auth) return 'signedIn';
+        const profile = store('profile-auth-module');
+        // A missing UID is also the initial state while Samply restores its session.
+        // Only a resolved anonymous identity confirms that sign-in is needed.
+        return profile?.uid && profile.isAnonymous === true ? 'signedOut' : 'checking';
+    }
     function assertAccount() {
         if (!account()) throw new Error('Sign in to Samply in the web window first.');
     }
@@ -94,7 +101,7 @@
             };
         }
         return {
-            version: 1, account: auth,
+            version: 1, account: auth, authentication: authenticationState(auth),
             libraryReady: !!auth && lib?.loading === false,
             library: auth && Array.isArray(lib?.items) ? lib.items.filter(i => !i.archived).map(i => ({
                 id: i.id, name: i.name, projectID: text(i.projectid), playerID: text(i.playerid),
