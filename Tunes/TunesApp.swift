@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct TunesApp: App {
     @State private var backend = SamplyBackend()
+    @FocusedValue(\.samplyPage) private var currentPage
 
     var body: some Scene {
         Window("Tunes", id: "library") {
@@ -12,10 +13,12 @@ struct TunesApp: App {
         .commands {
             AboutTunesCommands()
             CommandMenu("Samply") {
-                Button("Open Samply Sign-In and Player") { backend.web.showWindow() }
+                Button("Open in Samply") { Task { await backend.openInSamply(currentPage ?? .library) } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
-                Button("Refresh Library") { Task { await backend.refreshLibrary() } }
+                    .disabled(backend.isOpeningSamply || backend.isBrowsing || backend.isPlayingSelection || backend.isRefreshing)
+                Button((currentPage ?? .library).refreshLabel) { Task { await backend.refresh(currentPage ?? .library) } }
                     .keyboardShortcut("r", modifiers: .command)
+                    .disabled(!backend.isConnected || backend.isRefreshing || backend.isBrowsing || backend.isPlayingSelection || backend.isOpeningSamply)
             }
         }
         Window("About Tunes", id: "about") {

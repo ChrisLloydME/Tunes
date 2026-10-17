@@ -4,6 +4,16 @@ struct ContentView: View {
     @Bindable var backend: SamplyBackend
     @State private var showConnection = false
     @State private var showsProject = false
+    @State private var showsIssueDetails = false
+
+    private var issue: String? { backend.error ?? backend.playback.error ?? backend.web.connectionError }
+
+    private var currentPage: SamplyPage {
+        if showsProject, let item = backend.selectedItem {
+            return .album(routeID: item.routeID, groupID: backend.folderPath.last?.id)
+        }
+        return .library
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -29,15 +39,6 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 mainContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                if let error = backend.error ?? backend.playback.error ?? backend.web.connectionError {
-                    HStack(alignment: .top) {
-                        Image(systemName: "exclamationmark.triangle")
-                        Text(error).textSelection(.enabled).font(.caption)
-                        Spacer()
-                        Button("Open Samply") { backend.web.showWindow() }
-                    }
-                    .padding(12).background(.quaternary)
-                }
                 uploadStatus
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -45,6 +46,34 @@ struct ContentView: View {
             }
             .navigationTitle(showsProject ? backend.selectedItem?.name ?? "Library" : "Library")
             .toolbar {
+                ToolbarItem {
+                    if let issue {
+                        Button { showsIssueDetails.toggle() } label: {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.system(size: 16, weight: .medium))
+                        }
+                        .help(issue)
+                        .accessibilityLabel("Samply needs attention")
+                        .accessibilityIdentifier("samplyIssue")
+                        .popover(isPresented: $showsIssueDetails) {
+                            VStack(alignment: .leading, spacing: 16) {
+                                Text("Samply needs attention").font(.headline)
+                                Text(issue).font(.callout).textSelection(.enabled)
+                                if backend.needsActionRecovery {
+                                    Text("Trying to reconnect automatically…").font(.caption).foregroundStyle(.secondary)
+                                }
+                                HStack {
+                                    Button("Try Again") { Task { await backend.recover(currentPage, forcePageRefresh: true) } }
+                                        .disabled(backend.isRefreshing || backend.isBrowsing || backend.isPlayingSelection)
+                                    Button("Open in Samply") { Task { await backend.openInSamply(currentPage) } }
+                                        .disabled(backend.isOpeningSamply)
+                                }
+                            }
+                            .padding(20)
+                            .frame(width: 340, alignment: .leading)
+                        }
+                    }
+                }
                 ToolbarItem(placement: .navigation) {
                     if showsProject {
                         Button {
@@ -57,16 +86,17 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItemGroup {
-                    Button { Task { await backend.refreshLibrary() } } label: {
-                        Label("Refresh Library", systemImage: "arrow.clockwise")
+                    Button { Task { await backend.refresh(currentPage) } } label: {
+                        Label(currentPage.refreshLabel, systemImage: "arrow.clockwise")
                             .labelStyle(.iconOnly)
                             .font(.system(size: 20, weight: .semibold))
                             .imageScale(.small)
                             .frame(width: 24, height: 24)
                     }
-                    .help("Refresh Library")
-                    .accessibilityLabel("Refresh Library")
-                    Button { backend.web.showWindow() } label: {
+                    .help(currentPage.refreshLabel)
+                    .accessibilityLabel(currentPage.refreshLabel)
+                    .disabled(!backend.isConnected || backend.isRefreshing || backend.isBrowsing || backend.isPlayingSelection || backend.isOpeningSamply)
+                    Button { Task { await backend.openInSamply(currentPage) } } label: {
                         Label("Open in Samply", systemImage: "arrow.up.forward.app")
                             .labelStyle(.iconOnly)
                             .font(.system(size: 20, weight: .medium))
@@ -76,12 +106,29 @@ struct ContentView: View {
                     .help("Open in Samply")
                     .accessibilityLabel("Open in Samply")
                     .accessibilityIdentifier("openInSamply")
+                    .disabled(backend.isOpeningSamply || backend.isBrowsing || backend.isPlayingSelection || backend.isRefreshing)
                 }
             }
         }
         .sheet(isPresented: $showConnection) { ConnectionView(backend: backend) }
+        .focusedSceneValue(\.samplyPage, currentPage)
         .frame(minWidth: 860, minHeight: 560)
         .task { backend.start() }
+        .task(id: "\(currentPage)/\(backend.needsActionRecovery)") {
+            guard backend.needsActionRecovery else { return }
+            let page = currentPage
+            var delay = 250
+            while backend.needsActionRecovery, !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(delay)) }
+                catch { return }
+                guard !Task.isCancelled else { return }
+                await backend.recover(page)
+                delay = min(delay * 2, 2000)
+            }
+        }
+        .onChange(of: issue) { _, value in
+            if value == nil { showsIssueDetails = false }
+        }
         .onChange(of: backend.selectedItem?.id) { _, id in
             if id == nil { showsProject = false }
         }

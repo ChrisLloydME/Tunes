@@ -47,13 +47,31 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
             this.currentRoute.value.query = route.query;
             player.shareid = shareid; boxes.currentLevelId = route.query?.group;
         }};
-    const context = {location: {origin}, setTimeout, clearTimeout,
-        document: {querySelector() { return {__vue_app__: {config: {globalProperties: {$pinia: {_s: stores}, $router: router}}}}; }}};
+    const server = {library: [], boxes: []};
+    const dataAPI = {
+        a9: () => ({}), a7: {USERS: 'users', HISTORY: 'history', PROJECTS: 'projects', BOXES: 'boxes'},
+        a6: (_db, ...path) => ({path}), a3: (collection, filter) => ({...collection, filter}),
+        a5: (...args) => args, aJ: (_db, ...path) => ({path}),
+        async dZ(query) {
+            calls.push(['serverRead', query]);
+            return {docs: query.path[0] === 'users' ? server.library : server.boxes};
+        },
+        at: () => ({async getSecurePlayerBoxContent(args) {
+            calls.push(['sharedRead', args]); return {boxes: server.boxes.map(doc => ({id: doc.id, data: doc.data()}))};
+        }})
+    };
+    const context = {location: {origin}, URL, setTimeout, clearTimeout,
+        // Replace only the module-loading boundary; all adapter behavior runs unchanged.
+        __fixtureImport: async () => dataAPI,
+        document: {querySelector(selector) {
+            if (selector === 'script[type="module"][src]') return {src: origin + '/assets/index.1817c5c9.js'};
+            return {__vue_app__: {config: {globalProperties: {$pinia: {_s: stores}, $router: router}}}};
+        }}};
     context.window = context;
     context.top = context;
     vm.createContext(context);
-    vm.runInContext(script, context);
-    return {bridge: context.__tunesSamply, context, calls, audio, player, boxes, stores, auth, library, router};
+    vm.runInContext(script.replace('import(moduleURL.href)', '__fixtureImport(moduleURL.href)'), context);
+    return {bridge: context.__tunesSamply, context, calls, audio, player, boxes, stores, auth, library, router, server, dataAPI};
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
@@ -64,6 +82,15 @@ test('page initialization has a distinct retryable error and recovers without re
     await assert.rejects(f.bridge.command('snapshot'), error => error.code === 'TUNES_NOT_READY');
     f.context.document.querySelector = querySelector;
     assert.equal((await f.bridge.command('snapshot')).account.uid, 'user-a');
+});
+
+test('known rejected actions are distinct from transient page initialization', async () => {
+    const f = fixture({anonymous: true});
+    await assert.rejects(f.bridge.command('play'), error => error.code === 'TUNES_OPERATION_FAILED');
+    assert.deepEqual(f.calls, []);
+    f.auth.isAnonymous = false;
+    await assert.rejects(f.bridge.command('seek', {value: 'invalid'}), error => error.code === 'TUNES_OPERATION_FAILED');
+    assert.deepEqual(f.calls, []);
 });
 
 test('session restoration stays checking until a real or anonymous identity resolves', async () => {
@@ -291,4 +318,124 @@ test('waits for the player subscription even when the boxes store already claims
     assert.equal(loaded.boxes[0].id, 'file-1');
     f.boxes.boxViewModelsCurrentLevel = [];
     assert.equal((await f.bridge.command('snapshot')).boxesReady, true);
+});
+
+const serverDocument = (id, data) => ({id, data: () => data});
+function installRefreshedBoxModels(f) {
+    let documents = [];
+    Object.defineProperty(f.player, 'playerBoxes', {
+        get: () => documents,
+        set(value) {
+            documents = value;
+            f.boxes.boxViewModelsCurrentLevel = value.map(doc => ({id: doc.id, name: doc.data().name,
+                data: doc.data(), isAudio: true, activeid: doc.id}));
+        }
+    });
+}
+function playingState(f) {
+    f.audio.audioboxid = 'playing-file'; f.audio.playing = true; f.audio.currentTime = 42;
+    return plain(f.audio);
+}
+
+test('Library refresh reads server history, including shared items, without navigating or touching playback', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    f.server.library = [serverDocument('shared-new', {projectid: 'project-b', playerid: 'player-b', shareid: 'share-b',
+        snippet: {name: 'Updated shared album', owner: 'user-b', artist: {displayName: 'Artist'}}})];
+    const result = await f.bridge.command('refreshPage', {page: 'library'});
+    assert.equal(result.library[0].name, 'Updated shared album');
+    assert.equal(result.library[0].shareID, 'share-b');
+    assert.equal(result.library[0].isOwned, false);
+    assert.equal((await f.bridge.command('snapshot')).library[0].name, 'Updated shared album');
+    f.library.items = [{id: 'live-change', name: 'Later live change'}];
+    assert.equal((await f.bridge.command('snapshot')).library[0].name, 'Later live change');
+    assert.deepEqual(plain(f.calls), [['serverRead', {path: ['users', 'user-a', 'history'], filter: ['snippet.archived', '==', false]}]]);
+    assert.deepEqual(plain(f.audio), before);
+    assert.equal(f.router.currentRoute.value.params.shareid, 'share-1');
+});
+
+test('album and folder refresh replace only box data, keeping track, position, queue and playback unchanged', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    installRefreshedBoxModels(f);
+    f.player.isProjectOwner = true;
+    f.boxes.currentLevelId = 'folder-1';
+    f.router.currentRoute.value.query = {group: 'folder-1'};
+    f.server.boxes = [serverDocument('updated-file', {type: 'file', name: 'Updated track'})];
+    const result = await f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1', groupID: 'folder-1'});
+    assert.equal(result.boxes[0].name, 'Updated track');
+    assert.equal(result.levelID, 'folder-1');
+    assert.deepEqual(plain(f.calls), [['serverRead', {path: ['projects', 'project-1', 'boxes']}]]);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('shared albums refresh through Samply authorized player content without changing access settings', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    installRefreshedBoxModels(f);
+    f.server.boxes = [serverDocument('updated-file', {type: 'file', name: 'Shared update'})];
+    const result = await f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'});
+    assert.equal(result.boxes[0].name, 'Shared update');
+    assert.deepEqual(plain(f.calls), [['sharedRead', {playerid: 'player-1', shareid: 'share-1'}]]);
+    assert.deepEqual(plain(f.audio), before);
+    assert.equal(f.player.allowVersions, true);
+});
+
+test('denied refresh preserves existing contents and playback without any fallback', async () => {
+    const f = fixture();
+    const before = playingState(f), contents = f.boxes.boxViewModelsCurrentLevel;
+    f.dataAPI.at = () => ({async getSecurePlayerBoxContent() { throw new Error('Denied'); }});
+    await assert.rejects(f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'}), /Denied/);
+    assert.equal(f.boxes.boxViewModelsCurrentLevel, contents);
+    assert.deepEqual(plain(f.audio), before);
+    assert.deepEqual(f.calls, []);
+});
+
+test('Open in Samply navigates to the requested Library, album, or folder without audio actions', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    assert.equal(await f.bridge.command('navigatePage', {page: 'library'}), true);
+    assert.equal(await f.bridge.command('navigatePage', {page: 'album', routeID: 'share /2'}), true);
+    assert.equal(await f.bridge.command('navigatePage', {page: 'album', routeID: 'share /2', groupID: 'folder-2'}), true);
+    assert.deepEqual(plain(f.calls), [
+        ['navigate', {path: '/library'}],
+        ['navigate', {path: '/p/share%20%2F2', query: {}}],
+        ['navigate', {path: '/p/share%20%2F2', query: {group: 'folder-2'}}]
+    ]);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('navigation or account change discards an in-flight refresh before replacing any box data', async () => {
+    for (const changeAccount of [false, true]) {
+        const f = fixture();
+        const before = playingState(f);
+        installRefreshedBoxModels(f);
+        f.player.isProjectOwner = true;
+        let finish;
+        f.dataAPI.dZ = () => new Promise(resolve => { finish = resolve; });
+        const refreshing = f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'});
+        await new Promise(resolve => setImmediate(resolve));
+        if (changeAccount) f.auth.uid = 'user-b';
+        else await f.bridge.command('navigatePage', {page: 'library'});
+        finish({docs: [serverDocument('stale', {type: 'file', name: 'Stale track'})]});
+        await assert.rejects(refreshing, /superseded/);
+        assert.equal(f.player.playerBoxes.length, 0);
+        assert.deepEqual(plain(f.audio), before);
+    }
+});
+
+test('refreshing a temporarily loading album remains retryable without touching its contents or audio', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    f.player.playerBoxesLoading = true;
+    await assert.rejects(f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'}),
+        error => error.code === 'TUNES_NOT_READY');
+    assert.deepEqual(f.calls, []);
+    assert.deepEqual(plain(f.audio), before);
+    f.player.playerBoxesLoading = false;
+    installRefreshedBoxModels(f);
+    f.server.boxes = [serverDocument('ready-track', {type: 'file', name: 'Ready'})];
+    const result = await f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'});
+    assert.equal(result.boxes[0].name, 'Ready');
+    assert.deepEqual(plain(f.audio), before);
 });

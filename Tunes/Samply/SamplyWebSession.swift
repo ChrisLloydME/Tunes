@@ -16,6 +16,9 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bridgeHealth = SamplyBridgeHealth()
+    @ObservationIgnored private var isRefreshingSnapshot = false
+
+    var pollInterval: Duration { bridgeHealth.pollInterval(at: ProcessInfo.processInfo.systemUptime) }
     @ObservationIgnored private let script: String
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
 
@@ -94,24 +97,29 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         self.window = window
     }
 
-    func refresh() async {
-        guard !isSigningOut, !webView.isLoading,
-              webView.url?.host == "samply.app", webView.url?.scheme == "https" else { return }
+    @discardableResult
+    func refresh() async -> Bool {
+        guard !isSigningOut, !webView.isLoading, !isRefreshingSnapshot,
+              webView.url?.host == "samply.app", webView.url?.scheme == "https" else { return false }
+        isRefreshingSnapshot = true
+        defer { isRefreshingSnapshot = false }
         let stamp = generation
         do {
             let state: WebSnapshot = try await call("snapshot")
-            guard generation == stamp else { return }
+            guard generation == stamp else { return false }
             // A newer/different contract must never silently drive the native library.
             guard state.version == 1 else { throw SamplyError.invalidResponse }
             snapshot = state
             authenticationState = state.authenticationState
             bridgeHealth.reset()
             connectionError = nil
+            return true
         } catch {
-            guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return }
+            guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return false }
             if error is SamplyBridgeError,
-               !bridgeHealth.recordFailure(at: ProcessInfo.processInfo.systemUptime) { return }
+               !bridgeHealth.recordFailure(at: ProcessInfo.processInfo.systemUptime) { return false }
             connectionError = error.localizedDescription
+            return false
         }
     }
 
@@ -128,7 +136,11 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             return JSON.stringify({payload: await window.__tunesSamply.command(command, args)});
             } catch (error) {
                 // Never send arbitrary page exception text (which can contain URLs or credentials).
-                return JSON.stringify({failure: error?.code === 'TUNES_NOT_READY' ? 'notReady' : 'executionFailed'});
+                const code = error?.code;
+                const rejected = code === 'TUNES_OPERATION_FAILED' ||
+                    ['permission-denied', 'unauthenticated', 'not-found', 'functions/permission-denied',
+                     'functions/unauthenticated', 'functions/not-found'].includes(code);
+                return JSON.stringify({failure: code === 'TUNES_NOT_READY' ? 'notReady' : rejected ? 'operationFailed' : 'executionFailed'});
             }
             """, arguments: ["command": command, "args": arguments], in: nil, contentWorld: .page)
         } catch {
@@ -139,6 +151,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard let value = result as? String, let data = value.data(using: .utf8) else { throw SamplyError.invalidResponse }
         let response = try JSONDecoder().decode(SamplyBridgeResponse<T>.self, from: data)
         if response.failure == "notReady" { throw SamplyBridgeError.notReady }
+        if response.failure == "operationFailed" { throw SamplyBridgeError.operationFailed }
         if response.failure != nil { throw SamplyBridgeError.executionFailed }
         guard let payload = response.payload else { throw SamplyError.invalidResponse }
         return payload

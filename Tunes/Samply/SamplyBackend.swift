@@ -17,8 +17,11 @@ final class SamplyBackend {
     private(set) var isBrowsing = false
     private(set) var albumLoadState: AlbumLoadState = .idle
     private(set) var isPlayingSelection = false
+    private(set) var isRefreshing = false
+    private(set) var isOpeningSamply = false
     private(set) var hasToken = false
     private(set) var error: String?
+    private(set) var hasTransientError = false
     @ObservationIgnored private let tokens: any TokenStore
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var browseTask: Task<Void, Never>?
@@ -36,7 +39,7 @@ final class SamplyBackend {
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
         do { hasToken = try tokens.read() != nil }
-        catch { self.error = error.localizedDescription }
+        catch { recordFailure(error) }
     }
 
     var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
@@ -53,9 +56,9 @@ final class SamplyBackend {
         monitor = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                await self.web.refresh()
-                if !self.web.isSigningOut { self.acceptSnapshot() }
-                try? await Task.sleep(for: .milliseconds(700))
+                let refreshed = await self.web.refresh()
+                if refreshed, !self.web.isSigningOut { self.acceptSnapshot() }
+                try? await Task.sleep(for: self.web.pollInterval)
             }
         }
     }
@@ -71,7 +74,7 @@ final class SamplyBackend {
             // A PAT is a separate credential. Do not silently reuse account A's PAT for B.
             if accountID != nil {
                 do { try tokens.remove(); hasToken = false }
-                catch { self.error = error.localizedDescription }
+                catch { recordFailure(error) }
             }
             accountID = newAccount
         }
@@ -83,6 +86,20 @@ final class SamplyBackend {
             boxes = state.boxes
             albumLoadState = .loaded
         }
+    }
+
+    var needsActionRecovery: Bool { hasTransientError || playback.hasTransientError }
+
+    func recover(_ page: SamplyPage, forcePageRefresh: Bool = false) async {
+        // Retry reads only. Never replay play/pause/seek/upload commands or reload the WebView.
+        let needsPageRefresh = forcePageRefresh || hasTransientError
+        if await web.refresh() { acceptSnapshot() }
+        if needsPageRefresh { await refresh(page) }
+    }
+
+    private func recordFailure(_ failure: Error) {
+        error = failure.localizedDescription
+        hasTransientError = (failure as? SamplyBridgeError)?.isTransient == true
     }
 
     func select(_ item: LibraryItem) {
@@ -111,6 +128,7 @@ final class SamplyBackend {
         isBrowsing = true
         albumLoadState = .loading
         error = nil
+        hasTransientError = false
         browseTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -128,7 +146,7 @@ final class SamplyBackend {
                 guard generation == selectionGeneration else { return }
                 isBrowsing = false
                 albumLoadState = .failed
-                if !Task.isCancelled { self.error = error.localizedDescription }
+                if !Task.isCancelled { recordFailure(error) }
             }
         }
     }
@@ -147,6 +165,7 @@ final class SamplyBackend {
         let generation = selectionGeneration
         isPlayingSelection = true
         error = nil
+        hasTransientError = false
         playTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -157,7 +176,7 @@ final class SamplyBackend {
                 guard generation == selectionGeneration else { return }
                 playback.apply(state.playback)
             } catch {
-                if generation == selectionGeneration, !Task.isCancelled { self.error = error.localizedDescription }
+                if generation == selectionGeneration, !Task.isCancelled { recordFailure(error) }
             }
             if generation == selectionGeneration { isPlayingSelection = false }
         }
@@ -201,9 +220,54 @@ final class SamplyBackend {
         }
     }
 
-    func refreshLibrary() async {
-        await web.refresh()
-        acceptSnapshot()
+    func refresh(_ page: SamplyPage) async {
+        guard isConnected, !isRefreshing, !isBrowsing, !isPlayingSelection else { return }
+        let generation = selectionGeneration
+        let account = web.snapshot?.account?.uid
+        isRefreshing = true
+        defer { isRefreshing = false }
+        do {
+            let state: WebSnapshot = try await web.call("refreshPage", arguments: page.arguments)
+            try Task.checkCancellation()
+            guard state.version == 1 else { throw SamplyError.invalidResponse }
+            guard account == web.snapshot?.account?.uid, state.account?.uid == account,
+                  !web.isSigningOut else { return }
+            switch page {
+            case .library:
+                guard state.libraryReady else { throw SamplyError.invalidResponse }
+                library = state.library
+            case .album(let routeID, let groupID):
+                guard generation == selectionGeneration, let selectedItem,
+                      selectedItem.routeID == routeID, folderPath.last?.id == groupID else { return }
+                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID) else {
+                    throw SamplyError.invalidResponse
+                }
+                boxes = state.boxes
+                albumLoadState = .loaded
+            }
+            // Refresh only updates page data. The media engine and native playback stay intact.
+            error = nil
+            hasTransientError = false
+        } catch is CancellationError { }
+        catch {
+            if generation == selectionGeneration, account == web.snapshot?.account?.uid {
+                recordFailure(error)
+            }
+        }
+    }
+
+    func openInSamply(_ page: SamplyPage) async {
+        guard !isOpeningSamply else { return }
+        guard isConnected else { web.showWindow(); return }
+        isOpeningSamply = true
+        defer { isOpeningSamply = false }
+        do {
+            let _: Bool = try await web.call("navigatePage", arguments: page.arguments)
+            error = nil
+            hasTransientError = false
+            web.showWindow()
+        } catch is CancellationError { }
+        catch { recordFailure(error) }
     }
 
     func signOut() async {
@@ -212,12 +276,16 @@ final class SamplyBackend {
         playback.clear()
         uploader.reset()
         do { try tokens.remove(); hasToken = false }
-        catch { self.error = error.localizedDescription }
+        catch { recordFailure(error) }
         accountID = nil
         await web.signOut()
     }
 
     private func invalidateSelection() {
+        if hasTransientError {
+            error = nil
+            hasTransientError = false
+        }
         selectionGeneration += 1
         browseTask?.cancel()
         playTask?.cancel()

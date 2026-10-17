@@ -7,20 +7,29 @@ import Observation
 final class PlaybackController {
     private(set) var state = WebPlayback.empty
     private(set) var error: String?
+    private(set) var hasTransientError = false
     @ObservationIgnored private let web: SamplyWebSession
     @ObservationIgnored private var remoteTargets: [(MPRemoteCommand, Any)] = []
 
     init(web: SamplyWebSession) { self.web = web }
 
     func apply(_ state: WebPlayback?) {
+        let hadPlayerError = self.state.error != nil
         self.state = state ?? .empty
-        if let failure = state?.error { error = failure }
+        if let failure = state?.error {
+            error = failure
+            hasTransientError = false
+        } else if state != nil, hasTransientError || hadPlayerError {
+            error = nil
+            hasTransientError = false
+        }
         updateNowPlaying()
     }
 
     func clear() {
         state = .empty
         error = nil
+        hasTransientError = false
         updateNowPlaying()
     }
 
@@ -29,8 +38,14 @@ final class PlaybackController {
             let snapshot: WebSnapshot = try await web.call(command, arguments: value.map { ["value": $0] } ?? [:])
             apply(snapshot.playback)
             error = nil
+            hasTransientError = false
         } catch is CancellationError { }
-        catch { self.error = error.localizedDescription }
+        catch { recordCommandFailure(error) }
+    }
+
+    func recordCommandFailure(_ failure: Error) {
+        error = failure.localizedDescription
+        hasTransientError = (failure as? SamplyBridgeError)?.isTransient == true
     }
 
     func registerMediaKeys() {
