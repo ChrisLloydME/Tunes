@@ -10,6 +10,12 @@ struct AlbumDetailView: View {
     let item: LibraryItem
     let requestUpload: () -> Void
     @State private var versionTrack: WebBox?
+    @State private var loadingIndicatorID: String?
+
+    private var loadingID: String {
+        "\(item.id)/\(backend.folderPath.last?.id ?? "")/\(backend.albumLoadState)"
+    }
+    private var showsLoadingIndicator: Bool { loadingIndicatorID == loadingID }
 
     private var contents: AlbumContents { AlbumContents(boxes: backend.boxes) }
 
@@ -23,10 +29,18 @@ struct AlbumDetailView: View {
                 Divider()
                     .padding(.bottom, 24)
 
-                if backend.isBrowsing {
-                    ProgressView("Loading album…")
-                        .frame(maxWidth: .infinity)
+                if backend.albumLoadState == .loading || backend.albumLoadState == .idle {
+                    ZStack {
+                        if showsLoadingIndicator { ProgressView("Loading album…") }
+                    }
+                        .frame(maxWidth: .infinity, minHeight: 20)
                         .padding(.vertical, 48)
+                } else if backend.albumLoadState == .failed {
+                    ContentUnavailableView {
+                        Label("Could Not Load Album", systemImage: "exclamationmark.triangle")
+                    } description: {
+                        Text("Open the album again or check the Samply window to try again.")
+                    }
                 } else {
                     self.trackRows
                     self.folderRows
@@ -47,6 +61,16 @@ struct AlbumDetailView: View {
         .disabled(backend.isPlayingSelection)
         .sheet(item: $versionTrack) { track in
             AlbumVersionsView(backend: backend, track: track)
+        }
+        .task(id: loadingID) {
+            let identity = loadingID
+            loadingIndicatorID = nil
+            guard backend.albumLoadState == .loading || backend.albumLoadState == .idle else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(350))
+                try Task.checkCancellation()
+                loadingIndicatorID = identity
+            } catch { /* Navigation or completed loading cancels the pending indicator. */ }
         }
     }
 
@@ -87,7 +111,7 @@ struct AlbumDetailView: View {
                         .lineLimit(1)
                 }
 
-                Text(self.backend.isBrowsing ? "Loading…" : self.contents.metadataText)
+                Text(albumMetadata)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
@@ -110,13 +134,13 @@ struct AlbumDetailView: View {
             }
             .buttonStyle(.glassProminent)
             .controlSize(.large)
-            .disabled(backend.isBrowsing || contents.firstPlayableTrack == nil)
+            .disabled(backend.albumLoadState != .loaded || contents.firstPlayableTrack == nil)
             .accessibilityIdentifier("playAlbum")
 
             Menu {
                 if item.canUpload {
                     Button("Upload File…", systemImage: "square.and.arrow.up", action: requestUpload)
-                        .disabled(backend.uploader.isRunning || backend.isBrowsing)
+                        .disabled(backend.uploader.isRunning || backend.albumLoadState != .loaded)
                     Divider()
                 }
                 Button("Open in Samply", systemImage: "macwindow") { backend.web.showWindow() }
@@ -129,6 +153,14 @@ struct AlbumDetailView: View {
             .controlSize(.large)
             .fixedSize()
             .accessibilityIdentifier("albumActions")
+        }
+    }
+
+    private var albumMetadata: String {
+        switch backend.albumLoadState {
+        case .idle, .loading: showsLoadingIndicator ? "Loading…" : " "
+        case .failed: "Album unavailable"
+        case .loaded: contents.metadataText
         }
     }
 

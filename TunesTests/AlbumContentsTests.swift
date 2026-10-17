@@ -3,6 +3,27 @@ import Testing
 @testable import Tunes
 
 struct AlbumContentsTests {
+    @Test func onlyReadySnapshotsForTheSelectedAlbumAndFolderFinishLoading() {
+        let item = LibraryItem(id: "album", name: "Album", shareID: "share")
+        var state = WebSnapshot(version: 1, account: .init(uid: "fixture-user"),
+                                libraryReady: true, library: [], routeID: "share",
+                                boxesReady: false, boxes: [], capabilities: [])
+        #expect(!state.hasLoadedBoxes(for: item, groupID: nil))
+        state = WebSnapshot(version: 1, account: .init(uid: "fixture-user"),
+                            libraryReady: true, library: [], routeID: "share",
+                            boxesReady: true, boxes: [], capabilities: [])
+        // An empty result is valid only after the matching level is ready.
+        #expect(state.hasLoadedBoxes(for: item, groupID: nil))
+        #expect(!state.hasLoadedBoxes(for: item, groupID: "folder"))
+        state.levelID = "folder"
+        #expect(state.hasLoadedBoxes(for: item, groupID: "folder"))
+        state.routeID = "old-share"
+        #expect(!state.hasLoadedBoxes(for: item, groupID: "folder"))
+        state.routeID = "share"
+        state.account = nil
+        #expect(!state.hasLoadedBoxes(for: item, groupID: "folder"))
+    }
+
     private func box(_ id: String, kind: String = "file", duration: Double? = nil,
                      isAudio: Bool = false, processing: Bool = false) -> WebBox {
         WebBox(id: id, name: id, kind: kind, duration: duration,

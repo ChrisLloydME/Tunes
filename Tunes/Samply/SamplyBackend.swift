@@ -15,6 +15,7 @@ final class SamplyBackend {
     private(set) var selectedItem: LibraryItem?
     private(set) var folderPath: [WebBox] = []
     private(set) var isBrowsing = false
+    private(set) var albumLoadState: AlbumLoadState = .idle
     private(set) var isPlayingSelection = false
     private(set) var hasToken = false
     private(set) var error: String?
@@ -77,8 +78,11 @@ final class SamplyBackend {
         guard newAccount != nil else { return }
         if state.libraryReady { library = state.library }
         playback.apply(state.playback)
-        if !isBrowsing, let selectedItem, state.routeID == selectedItem.routeID,
-           state.levelID == folderPath.last?.id, state.boxesReady { boxes = state.boxes }
+        if !isBrowsing, let selectedItem,
+           state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id) {
+            boxes = state.boxes
+            albumLoadState = .loaded
+        }
     }
 
     func select(_ item: LibraryItem) {
@@ -105,6 +109,7 @@ final class SamplyBackend {
         let generation = selectionGeneration
         boxes = []
         isBrowsing = true
+        albumLoadState = .loading
         error = nil
         browseTask = Task { [weak self] in
             guard let self else { return }
@@ -114,11 +119,15 @@ final class SamplyBackend {
                 let state: WebSnapshot = try await web.call("browse", arguments: args)
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
-                boxes = state.boxes
+                if state.hasLoadedBoxes(for: item, groupID: groupID) {
+                    boxes = state.boxes
+                    albumLoadState = .loaded
+                }
                 isBrowsing = false
             } catch {
                 guard generation == selectionGeneration else { return }
                 isBrowsing = false
+                albumLoadState = .failed
                 if !Task.isCancelled { self.error = error.localizedDescription }
             }
         }
@@ -133,7 +142,7 @@ final class SamplyBackend {
     }
 
     func play(_ box: WebBox) {
-        guard !isBrowsing, !isPlayingSelection, box.isAudio, !box.isProcessing,
+        guard albumLoadState == .loaded, !isBrowsing, !isPlayingSelection, box.isAudio, !box.isProcessing,
               let selectedItem else { return }
         let generation = selectionGeneration
         isPlayingSelection = true
@@ -216,6 +225,7 @@ final class SamplyBackend {
         boxes = []
         folderPath = []
         isBrowsing = false
+        albumLoadState = .idle
         isPlayingSelection = false
     }
 }

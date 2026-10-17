@@ -23,7 +23,8 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
         }
     };
     const player = {shareid: 'share-1', playerid: 'player-1', parentProjectID: 'project-1',
-        allowVersions: true, playerDocumentData: {name: 'Shared'}, parentProjectData: {name: 'Project'}, defaultQuality: 'lossless'};
+        allowVersions: true, playerDocumentData: {name: 'Shared'}, playerBoxesLoading: false,
+        parentProjectData: {name: 'Project'}, defaultQuality: 'lossless'};
     const boxes = {loadingBoxes: false, boxViewModelsCurrentLevel: [file], audioBoxes: [{id: file.id, data: raw}],
         getBox(id, viewModel = true) { return id === file.id ? viewModel ? file : raw : undefined; },
         getPlayableBoxViewModel(value) { return value; }, getBoxVersions() { return [file]; },
@@ -43,6 +44,7 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
             const shareid = decodeURIComponent(route.path.split('/').pop());
             this.currentRoute.value.path = route.path;
             this.currentRoute.value.params.shareid = shareid;
+            this.currentRoute.value.query = route.query;
             player.shareid = shareid; boxes.currentLevelId = route.query?.group;
         }};
     const context = {location: {origin}, setTimeout, clearTimeout,
@@ -249,4 +251,44 @@ test('does not publish stale boxes during a player route transition', async () =
     const f = fixture(); f.player.shareid = 'previous-share';
     const snapshot = await f.bridge.command('snapshot');
     assert.equal(snapshot.boxesReady, false); assert.equal(snapshot.boxes.length, 0);
+});
+
+test('does not report unloaded view models or the previous folder as an empty album', async () => {
+    const f = fixture();
+    const models = f.boxes.boxViewModelsCurrentLevel;
+    f.boxes.boxViewModelsCurrentLevel = undefined;
+    assert.equal((await f.bridge.command('snapshot')).boxesReady, false);
+    const browsing = f.bridge.command('browse', {routeID: 'share-2'});
+    setTimeout(() => { f.boxes.boxViewModelsCurrentLevel = models; }, 5);
+    const loaded = await browsing;
+    assert.equal(loaded.boxesReady, true);
+    assert.equal(loaded.boxes[0].id, 'file-1');
+    f.router.currentRoute.value.query = {group: 'new-folder'};
+    assert.equal((await f.bridge.command('snapshot')).boxesReady, false);
+    f.boxes.currentLevelId = 'new-folder';
+    f.boxes.boxViewModelsCurrentLevel = [];
+    const empty = await f.bridge.command('snapshot');
+    assert.equal(empty.boxesReady, true);
+    assert.equal(empty.boxes.length, 0);
+});
+
+test('waits for the player subscription even when the boxes store already claims it is ready', async () => {
+    const f = fixture();
+    const models = f.boxes.boxViewModelsCurrentLevel;
+    f.player.playerBoxesLoading = true;
+    f.boxes.loadingBoxes = false;
+    f.boxes.boxViewModelsCurrentLevel = [];
+    assert.equal((await f.bridge.command('snapshot')).boxesReady, false);
+    const browsing = f.bridge.command('browse', {routeID: 'share-2'});
+    let finished = false;
+    browsing.then(() => { finished = true; });
+    await new Promise(resolve => setTimeout(resolve, 120));
+    assert.equal(finished, false);
+    f.boxes.boxViewModelsCurrentLevel = models;
+    f.player.playerBoxesLoading = false;
+    const loaded = await browsing;
+    assert.equal(loaded.boxesReady, true);
+    assert.equal(loaded.boxes[0].id, 'file-1');
+    f.boxes.boxViewModelsCurrentLevel = [];
+    assert.equal((await f.bridge.command('snapshot')).boxesReady, true);
 });

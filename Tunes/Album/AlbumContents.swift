@@ -1,5 +1,16 @@
 import Foundation
 
+enum AlbumLoadState {
+    case idle, loading, loaded, failed
+}
+
+extension WebSnapshot {
+    func hasLoadedBoxes(for item: LibraryItem, groupID: String?) -> Bool {
+        authenticationState == .signedIn && boxesReady &&
+            routeID == item.routeID && levelID == groupID
+    }
+}
+
 /// Presents the current Samply level as an album without counting folders or documents as songs.
 struct AlbumContents {
     let tracks: [WebBox]

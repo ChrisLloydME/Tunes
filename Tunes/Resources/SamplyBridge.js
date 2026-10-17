@@ -88,8 +88,11 @@
         if (lib && Array.isArray(lib.items)) capabilities.push('library');
         if (boxes && typeof boxes.getBox === 'function') capabilities.push('boxes');
         if (audio && ['play', 'pause', 'seek', 'setVolume', 'loadBox'].every(k => typeof audio[k] === 'function')) capabilities.push('playback');
-        const boxesReady = !!auth && !!player?.playerDocumentData && boxes?.loadingBoxes === false &&
-            player?.shareid === g.$router.currentRoute.value.params.shareid;
+        const boxesReady = !!auth && !!player?.playerDocumentData && player.playerBoxesLoading === false &&
+            boxes?.loadingBoxes === false &&
+            player?.shareid === g.$router.currentRoute.value.params.shareid &&
+            (boxes.currentLevelId || null) === (g.$router.currentRoute.value.query?.group || null) &&
+            Array.isArray(boxes.boxViewModelsCurrentLevel);
         let playback = null;
         if (audio && auth) {
             playback = {
@@ -129,7 +132,8 @@
         await waitFor(() => {
             const p = store('player'), b = store('boxes');
             return globals().$router.currentRoute.value.params.shareid === id && p?.shareid === id &&
-                p?.playerDocumentData && b?.loadingBoxes === false &&
+                p?.playerDocumentData && p.playerBoxesLoading === false && b?.loadingBoxes === false &&
+                Array.isArray(b.boxViewModelsCurrentLevel) &&
                 (args.groupID ? b.currentLevelId === args.groupID : !b.currentLevelId);
         }, ticket);
         return snapshot();
