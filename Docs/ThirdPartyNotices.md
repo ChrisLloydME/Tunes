@@ -23,6 +23,9 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
   Copied the palette extraction code from `Utilities/ColorExtractor.swift` with
   the existing Tunes memory-only artwork cache. Removed previews, haptics, and
   the upstream palette cache dependency; inlined the quick animation constant.
+  Tunes uses its theme accent for interactive controls. Palette extraction retains
+  bright saturated artwork pixels, ignores transparent pixels, and uses a neutral
+  fallback instead of borrowing the system accent.
 - `Tunes/Playback/PlayerBar.swift`: directly adapted from
   `Sources/Kaset/Views/PlayerBar.swift`. Preserves the glass container, fixed
   section widths, compact breakpoint, transport/volume placement, timeline,
@@ -38,9 +41,8 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
   compatibility environment, and replace its artwork cache with a memory-only
   Tunes cache. `PlayerBarGlass.swift` retains the native macOS branch of
   `Sources/Kaset/Utilities/LiquidGlassCompat.swift`.
-- `Tunes/Assets.xcassets/PlayerAccent.colorset`: copied Kaset's
-  `Resources/Assets.xcassets/AccentColor.colorset`, scoped to the player so native
-  sidebar selection keeps its system styling.
+- Interactive controls use SwiftUI `Color.accentColor`; Kaset's fixed pink/red
+  accent asset has been removed.
 
 All copied files carry a provenance comment. Tunes' Sidebar uses standard
 SwiftUI `List(selection:)` styling rather than Kaset's custom sidebar row.
