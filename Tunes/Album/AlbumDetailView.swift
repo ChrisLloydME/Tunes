@@ -137,22 +137,22 @@ struct AlbumDetailView: View {
             .disabled(backend.albumLoadState != .loaded || contents.firstPlayableTrack == nil)
             .accessibilityIdentifier("playAlbum")
 
-            Menu {
-                if item.canUpload {
-                    Button("Upload File…", systemImage: "square.and.arrow.up", action: requestUpload)
-                        .disabled(backend.uploader.isRunning || backend.albumLoadState != .loaded)
-                    Divider()
+            if item.canUpload {
+                Button(action: requestUpload) {
+                    Label("Upload File…", systemImage: "arrow.up")
+                        .labelStyle(.iconOnly)
+                        .font(.system(size: 16, weight: .semibold))
+                        .frame(width: 20, height: 20)
                 }
-                Button("Open in Samply", systemImage: "macwindow") { backend.web.showWindow() }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .accessibilityLabel("Album Actions")
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .controlSize(.large)
+                .help("Upload File…")
+                .accessibilityLabel("Upload File…")
+                .accessibilityIdentifier("uploadAlbumFile")
+                .disabled(backend.uploader.isRunning || backend.albumLoadState != .loaded)
             }
-            .menuIndicator(.hidden)
-            .buttonStyle(.bordered)
-            .controlSize(.large)
-            .fixedSize()
-            .accessibilityIdentifier("albumActions")
+
         }
     }
 

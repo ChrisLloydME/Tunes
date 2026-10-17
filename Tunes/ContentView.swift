@@ -57,10 +57,25 @@ struct ContentView: View {
                     }
                 }
                 ToolbarItemGroup {
-                    Button { Task { await backend.refreshLibrary() } } label: { Image(systemName: "arrow.clockwise") }
-                        .help("Refresh Library")
-                        .accessibilityLabel("Refresh Library")
-                    Button("Connection Settings", systemImage: "gearshape") { showConnection = true }
+                    Button { Task { await backend.refreshLibrary() } } label: {
+                        Label("Refresh Library", systemImage: "arrow.clockwise")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 20, weight: .semibold))
+                            .imageScale(.small)
+                            .frame(width: 24, height: 24)
+                    }
+                    .help("Refresh Library")
+                    .accessibilityLabel("Refresh Library")
+                    Button { backend.web.showWindow() } label: {
+                        Label("Open in Samply", systemImage: "arrow.up.forward.app")
+                            .labelStyle(.iconOnly)
+                            .font(.system(size: 20, weight: .medium))
+                            .imageScale(.medium)
+                            .frame(width: 24, height: 24)
+                    }
+                    .help("Open in Samply")
+                    .accessibilityLabel("Open in Samply")
+                    .accessibilityIdentifier("openInSamply")
                 }
             }
         }
