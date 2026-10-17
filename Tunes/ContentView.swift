@@ -2,75 +2,33 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var backend: SamplyBackend
-    @State private var query = ""
     @State private var showConnection = false
-    @State private var seekPosition: Double = 0
-    @State private var isSeeking = false
-
-    private var items: [LibraryItem] {
-        backend.library.filter { query.isEmpty || $0.name.localizedCaseInsensitiveContains(query) ||
-            ($0.artist?.localizedCaseInsensitiveContains(query) ?? false) }
-    }
+    @State private var showsProject = false
 
     var body: some View {
         NavigationSplitView {
-            List(selection: Binding(get: { backend.selectedItem?.id }, set: { id in
-                if let item = backend.library.first(where: { $0.id == id }) { backend.select(item) }
-            })) {
-                Section("Library") {
-                    ForEach(items) { item in
-                        Label {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(item.name).lineLimit(1)
-                                if let artist = item.artist, !artist.isEmpty {
-                                    Text(artist).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                            }
-                        } icon: {
-                            Image(systemName: item.isOwned ? "square.stack" : "person.2")
-                        }
-                        .tag(item.id)
-                    }
-                }
+            List(selection: Binding<String?>(
+                get: { "library" },
+                set: { _ in showsProject = false }
+            )) {
+                Label("Library", systemImage: "square.stack")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .tag("library")
+                    .accessibilityIdentifier("libraryNavigation")
+                    .simultaneousGesture(TapGesture().onEnded { showsProject = false })
+                    .accessibilityAction { showsProject = false }
             }
-            .disabled(backend.isPlayingSelection || !backend.isConnected)
-            .searchable(text: $query, prompt: "Search Library")
-            .navigationSplitViewColumnWidth(min: 220, ideal: 265)
-            .safeAreaInset(edge: .bottom) {
-                HStack {
-                    Image(systemName: backend.isConnected ? "person.crop.circle.fill" : "person.crop.circle")
-                    Text(backend.web.snapshot?.account?.name ?? (backend.isConnected ? "Connected to Samply" : "Not Connected"))
-                        .lineLimit(1)
-                    Spacer()
-                    Button { showConnection = true } label: { Image(systemName: "gearshape") }
-                        .buttonStyle(.borderless).help("Connection Settings")
-                }
-                .font(.callout).padding()
+            .listStyle(.sidebar)
+            .onKeyPress(.return) {
+                showsProject = false
+                return .handled
             }
+            .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 260)
         } detail: {
             VStack(spacing: 0) {
-                if !backend.isConnected {
-                    ContentUnavailableView {
-                        Label("Connect to Samply", systemImage: "waveform")
-                    } description: {
-                        Text("Sign in to browse your projects and shared music.")
-                    } actions: {
-                        VStack(spacing: 20) {
-                            Button("Sign In to Samply") { backend.web.showWindow() }
-                                .buttonStyle(.borderedProminent)
-                                .accessibilityIdentifier("connectSamply")
-                            EmailSignInLinkView(session: backend.web)
-                                .frame(maxWidth: 440)
-                        }
-                    }
-                } else if let item = backend.selectedItem {
-                    projectContent(item)
-                } else if !backend.libraryReady {
-                    ProgressView("Loading your Samply library…").frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    ContentUnavailableView(backend.library.isEmpty ? "Your Library Is Empty" : "Select a Project",
-                                           systemImage: "square.stack", description: Text("Your projects and shared music appear in the sidebar."))
-                }
+                mainContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if let error = backend.error ?? backend.playback.error ?? backend.web.connectionError {
                     HStack(alignment: .top) {
                         Image(systemName: "exclamationmark.triangle")
@@ -81,14 +39,27 @@ struct ContentView: View {
                     .padding(12).background(.quaternary)
                 }
                 uploadStatus
-                Divider()
-                playerBar
             }
-            .navigationTitle(backend.selectedItem?.name ?? "Tunes")
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                PlayerBar(playback: backend.playback, isSelectingTrack: backend.isPlayingSelection)
+            }
+            .navigationTitle(showsProject ? backend.selectedItem?.name ?? "Library" : "Library")
             .toolbar {
+                ToolbarItem(placement: .navigation) {
+                    if showsProject {
+                        Button {
+                            if backend.folderPath.isEmpty { showsProject = false }
+                            else { backend.goUp() }
+                        } label: { Image(systemName: "chevron.left") }
+                        .help(backend.folderPath.isEmpty ? "Back to Library" : "Go Up")
+                        .accessibilityLabel(backend.folderPath.isEmpty ? "Back to Library" : "Go Up")
+                        .disabled(backend.isPlayingSelection)
+                    }
+                }
                 ToolbarItemGroup {
                     Button { Task { await backend.refreshLibrary() } } label: { Image(systemName: "arrow.clockwise") }
                         .help("Refresh Library")
+                        .accessibilityLabel("Refresh Library")
                     Button("Samply Window", systemImage: "macwindow") { backend.web.showWindow() }
                     Button("Connection Settings", systemImage: "gearshape") { showConnection = true }
                 }
@@ -97,26 +68,63 @@ struct ContentView: View {
         .sheet(isPresented: $showConnection) { ConnectionView(backend: backend) }
         .frame(minWidth: 860, minHeight: 560)
         .task { backend.start() }
+        .onChange(of: backend.selectedItem?.id) { _, id in
+            if id == nil { showsProject = false }
+        }
+    }
+
+    @ViewBuilder private var mainContent: some View {
+        if !backend.isConnected {
+            ContentUnavailableView {
+                Label("Connect to Samply", systemImage: "waveform")
+            } description: {
+                Text("Sign in to browse your projects and shared music.")
+            } actions: {
+                VStack(spacing: 20) {
+                    Button("Sign In to Samply") { backend.web.showWindow() }
+                        .buttonStyle(.borderedProminent)
+                        .accessibilityIdentifier("connectSamply")
+                    EmailSignInLinkView(session: backend.web)
+                        .frame(maxWidth: 440)
+                }
+            }
+        } else if showsProject, let item = backend.selectedItem {
+            projectContent(item)
+        } else if !backend.libraryReady {
+            ProgressView("Loading your Samply library…")
+        } else {
+            LibraryView(items: backend.library, isOpeningProject: backend.isPlayingSelection) { item in
+                backend.select(item)
+                showsProject = true
+            }
+        }
     }
 
     private func projectContent(_ item: LibraryItem) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                if !backend.folderPath.isEmpty {
-                    Button { backend.goUp() } label: { Image(systemName: "chevron.left") }.help("Go Up")
+            HStack(alignment: .bottom, spacing: 24) {
+                ProjectArtwork(artwork: item.artwork, size: 160)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(backend.folderPath.last?.name ?? item.name)
+                        .font(.system(size: 28, weight: .bold)).lineLimit(3)
+                        .textSelection(.enabled)
+                    if let artist = item.artist, !artist.isEmpty {
+                        Text(artist).font(.title3).foregroundStyle(.secondary)
+                    }
+                    if !backend.folderPath.isEmpty {
+                        Text(item.name).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if item.canUpload {
+                        Button("Upload File", systemImage: "square.and.arrow.up") {
+                            if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
+                        }
+                        .padding(.top, 8)
+                        .disabled(backend.uploader.isRunning || backend.isBrowsing)
+                    }
                 }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(backend.folderPath.last?.name ?? item.name).font(.title2.weight(.semibold))
-                    if let artist = item.artist { Text(artist).foregroundStyle(.secondary) }
-                }
-                Spacer()
-                if item.canUpload {
-                    Button("Upload File", systemImage: "square.and.arrow.up") {
-                        if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
-                    }.disabled(backend.uploader.isRunning || backend.isBrowsing)
-                }
-            }.padding(20)
-            Divider()
+                Spacer(minLength: 0)
+            }.padding(24)
+            Divider().padding(.horizontal, 24)
             if backend.isBrowsing {
                 ProgressView("Loading project…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if backend.boxes.isEmpty {
@@ -190,51 +198,6 @@ struct ContentView: View {
         case .failed(let error):
             Text("Upload failed: \(error)").font(.caption).textSelection(.enabled).padding()
         }
-    }
-
-    private var playerBar: some View {
-        let state = backend.playback.state
-        return VStack(spacing: 8) {
-            HStack(spacing: 18) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(state.title ?? "Not Playing").fontWeight(.medium).lineLimit(1)
-                    Text(state.album ?? "Samply").font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                Button { Task { await backend.playback.perform("previous") } } label: { Image(systemName: "backward.end.fill") }
-                    .help("Previous Track").accessibilityLabel("Previous Track")
-                    .disabled(!state.canGoPrevious)
-                Button { Task { await backend.playback.perform("toggle") } } label: {
-                    Image(systemName: state.playing ? "pause.fill" : "play.fill").font(.title3).frame(width: 24)
-                }.help(state.playing ? "Pause" : "Play")
-                    .accessibilityLabel(state.playing ? "Pause" : "Play")
-                    .disabled(state.fileID == nil)
-                Button { Task { await backend.playback.perform("next") } } label: { Image(systemName: "forward.end.fill") }
-                    .help("Next Track").accessibilityLabel("Next Track")
-                    .disabled(!state.canGoNext)
-                if state.loading || state.buffering || backend.isPlayingSelection { ProgressView().controlSize(.small) }
-                Menu(state.quality == "lossless" ? "Lossless" : "AAC") {
-                    Button("AAC") { Task { await backend.playback.perform("quality", value: "compressed") } }
-                    Button("Lossless") { Task { await backend.playback.perform("quality", value: "lossless") } }
-                }.frame(width: 90).help("Audio Quality").disabled(state.fileID == nil)
-                Image(systemName: "speaker.wave.2")
-                Slider(value: Binding(get: { state.volume }, set: { value in
-                    Task { await backend.playback.perform("volume", value: value) }
-                }), in: 0...1).frame(width: 90).accessibilityLabel("Volume")
-                    .disabled(state.fileID == nil)
-            }.buttonStyle(.borderless)
-            HStack {
-                Text(time(isSeeking ? seekPosition : state.position)).monospacedDigit()
-                Slider(value: Binding(get: { isSeeking ? seekPosition : min(state.position, max(state.duration, 1)) }, set: {
-                    seekPosition = $0
-                }), in: 0...max(state.duration, 1), onEditingChanged: { editing in
-                    if editing { seekPosition = state.position }
-                    isSeeking = editing
-                    if !editing { Task { await backend.playback.perform("seek", value: seekPosition) } }
-                })
-                .disabled(state.duration <= 0).accessibilityLabel("Playback Position")
-                Text(time(state.duration)).monospacedDigit()
-            }.font(.caption).foregroundStyle(.secondary)
-        }.padding(16)
     }
 
     private func time(_ value: Double) -> String {
