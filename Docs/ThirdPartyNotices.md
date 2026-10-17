@@ -8,6 +8,21 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
 
 - `Tunes/LibraryView.swift`: album card layout adapted from
   `Sources/Kaset/Views/LibraryView.swift`.
+- `Tunes/Album/AlbumDetailView.swift`: directly adapted the album branch of
+  `Sources/Kaset/Views/PlaylistDetailView.swift` and its
+  `PlaylistDetailView+HeaderActions.swift`. Preserves the single lazy scroll stack,
+  180-point cover, header typography/spacing, Play button style, and track dividers.
+  Removed queue editing, playlist management, likes, AI refinement, pinning, and
+  artist navigation. Optional uploads and alternate versions live in secondary menus.
+- `Tunes/Album/AlbumTrackRow.swift`: copied the album branch of
+  `Sources/Kaset/Views/PlaylistTrackRow.swift`, replacing YouTube song/player data
+  with Samply state and removing likes, explicit badges, and artist links.
+- `Tunes/Album/Kaset/`: copied `AccentBackground.swift`, `TopFade.swift`,
+  `SharedViews/DetailContentLayout.swift`, `SharedViews/EqualizerView.swift`,
+  and the row style from `SharedViews/InteractiveCardStyle.swift`.
+  Copied the palette extraction code from `Utilities/ColorExtractor.swift` with
+  the existing Tunes memory-only artwork cache. Removed previews, haptics, and
+  the upstream palette cache dependency; inlined the quick animation constant.
 - `Tunes/Playback/PlayerBar.swift`: directly adapted from
   `Sources/Kaset/Views/PlayerBar.swift`. Preserves the glass container, fixed
   section widths, compact breakpoint, transport/volume placement, timeline,
