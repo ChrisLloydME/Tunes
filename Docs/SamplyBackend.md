@@ -60,4 +60,4 @@ Not implemented: resumable uploads, system background transfers, failed-ticket c
 - [Samply Authentication](https://docs.samply.app/api/authentication.html)
 - [Samply Projects](https://docs.samply.app/api/projects.html)
 - [Samply Files](https://docs.samply.app/api/files.html)
-- [Kaset architecture reference](https://github.com/sozercan/kaset/blob/main/docs/architecture.md): used only as a reference for persistent WebKit playback and separate native state; no Kaset source code was copied.
+- [Kaset architecture reference](https://github.com/sozercan/kaset/blob/main/docs/architecture.md): persistent WebKit playback with separate native state. The Library album grid and floating player layout are also adapted from Kaset; see [ThirdPartyNotices.md](ThirdPartyNotices.md) for provenance and the MIT license.
