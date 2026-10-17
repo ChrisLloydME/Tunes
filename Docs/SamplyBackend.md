@@ -25,6 +25,7 @@ On 2026-10-17, Samply's public build `index.1817c5c9.js` and its LibraryView, us
 - `player`: current share identity, authorized project/player context, and playback options.
 - `boxes`: current level, playable files, versions, folders, and processing state.
 - `audio-module`: the same loadBox call as official FileView, preserving its player, project, queue, quality, and loudness options. Samply continues to own audio URLs, transcoding, gapless playback, and permissions.
+- `audio-shaka-module`: Samply normally synchronizes its media-element clock through `requestAnimationFrame` calls to `opts.ontimeupdate`. Animation frames may stop while the app's WebKit window is hidden. When snapshot polling observes a media-time change, it invokes the same update entry point, preserving Samply's track-relative time and gapless transitions without estimating progress with a native timer or reading streaming URLs.
 
 These are not stable public APIs. The implementation checks for required objects/methods and bounds navigation and selection with deadlines and identity checks. Website updates may require changes to this single adapter. Isolated tests establish local contract handling, not real-account end-to-end Samply compatibility.
 

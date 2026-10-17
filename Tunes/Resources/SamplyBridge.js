@@ -57,8 +57,21 @@
             versionName: text(vm.versionName), childIDs: children.map(v => v.id)
         };
     }
+    function syncPlaybackClock() {
+        // Samply's audio-shaka-module normally samples the media element from
+        // requestAnimationFrame. WebKit suspends those frames in our hidden web
+        // window even while audio continues. Use its existing time-update path
+        // when polling so track-relative time and gapless transitions stay owned
+        // by Samply; the native UI must not invent elapsed time or read stream URLs.
+        const engine = store('audio-shaka-module');
+        const currentTime = engine?.audio?.currentTime;
+        if (engine?.loading || !Number.isFinite(currentTime) || currentTime < 0 ||
+            currentTime === engine.currentTime) return;
+        if (typeof engine?.opts?.ontimeupdate === 'function') engine.opts.ontimeupdate();
+    }
     function snapshot() {
         const g = globals(), auth = account(), lib = store('library');
+        if (auth) syncPlaybackClock();
         const player = store('player'), boxes = store('boxes'), audio = store('audio-module');
         const capabilities = [];
         if (lib && Array.isArray(lib.items)) capabilities.push('library');

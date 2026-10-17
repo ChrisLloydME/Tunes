@@ -55,6 +55,76 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
+// Samply normally invokes this callback from requestAnimationFrame, which WebKit
+// can suspend while the app-owned web window is hidden. No animation frames run here.
+function installMediaClock(f, {gapless = false} = {}) {
+    const media = {currentTime: gapless ? 125 : 5, paused: false};
+    const engine = {audio: media, currentTime: media.currentTime, loading: false,
+        opts: {ontimeupdate() {
+            engine.currentTime = media.currentTime;
+            if (gapless && media.currentTime >= 240) f.audio.audioboxid = 'file-2';
+            const start = gapless ? (media.currentTime >= 240 ? 240 : 120) : 0;
+            f.audio.currentTime = engine.currentTime - start;
+        }}};
+    f.audio.audioboxid = 'file-1';
+    f.audio.playing = true;
+    f.stores.set('audio-shaka-module', engine);
+    return {media, engine};
+}
+
+test('snapshots advance from the media clock without animation frames or user interaction', async () => {
+    const f = fixture();
+    const {media} = installMediaClock(f);
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 5);
+    media.currentTime = 12.75;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 12.75);
+    media.currentTime = 21;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 21);
+    f.audio.seek = value => {
+        f.calls.push(['seek', value]);
+        media.currentTime = value;
+    };
+    assert.equal((await f.bridge.command('seek', {value: 70})).playback.position, 70);
+    media.currentTime = 72;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 72);
+    media.paused = true;
+    f.audio.playing = false;
+    const paused = await f.bridge.command('snapshot');
+    assert.equal(paused.playback.position, 72);
+    assert.equal(paused.playback.playing, false);
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 72);
+    assert.deepEqual(f.calls, [['seek', 70]]);
+});
+
+test('clock sampling preserves Samply gapless offsets and track transitions', async () => {
+    const f = fixture();
+    const {media} = installMediaClock(f, {gapless: true});
+    media.currentTime = 150;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 30);
+    media.currentTime = 243;
+    const next = await f.bridge.command('snapshot');
+    assert.equal(next.playback.fileID, 'file-2');
+    assert.equal(next.playback.position, 3);
+});
+
+test('does not sample an invalid or still-loading media clock', async () => {
+    const f = fixture();
+    const {media, engine} = installMediaClock(f);
+    media.currentTime = NaN;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 5);
+    media.currentTime = 99;
+    engine.loading = true;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 5);
+});
+
+test('keeps snapshots usable if the optional engine callback is unavailable', async () => {
+    const f = fixture();
+    const {engine, media} = installMediaClock(f);
+    media.currentTime = 20;
+    delete engine.opts;
+    assert.equal((await f.bridge.command('snapshot')).playback.position, 5);
+});
+
 test('library includes shared players, filters archives, and emits no credentials', async () => {
     const f = fixture();
     const s = await f.bridge.command('snapshot');
