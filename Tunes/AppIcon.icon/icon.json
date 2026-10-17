@@ -1,0 +1,42 @@
+{
+  "fill" : {
+    "automatic-gradient" : "srgb:1.00000,0.01569,0.21176,1.00000"
+  },
+  "groups" : [
+    {
+      "blur-material" : null,
+      "layers" : [
+        {
+          "image-name" : "logo-white.png",
+          "name" : "logo-white",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              1,
+              -1
+            ]
+          }
+        }
+      ],
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : false,
+        "strength" : 0.5
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
