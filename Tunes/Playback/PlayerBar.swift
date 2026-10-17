@@ -196,6 +196,7 @@ struct PlayerBar: View {
             .padding(.top, 18)
             .zIndex(1)
             .focusable(self.canSeek)
+            .focusEffectDisabled()
             .onKeyPress(.leftArrow) { self.seekByKeyboard(-5) }
             .onKeyPress(.rightArrow) { self.seekByKeyboard(5) }
 
