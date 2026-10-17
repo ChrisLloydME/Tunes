@@ -20,6 +20,16 @@ For email sign-in, request the email from that window, copy the complete link fr
 
 The planned browser sign-in flow uses official authorization: Tunes starts authorization, the user confirms in the default browser, and the browser returns to Tunes. This entry point will become available only after Samply registers Tunes as a client and confirms a supported route to a complete Library and player session. See [Authentication design and integration requirements](Docs/AuthenticationDesign.md). The previous bookmark, script, and local receiver approaches have been removed.
 
+## Code layout and architecture
+
+- `Tunes/App`: app entry point, scenes, navigation shell, and `SamplyBackend` coordination.
+- `Tunes/Features`: Library, album/folder browsing, playback, connection settings, and About UI.
+- `Tunes/Samply`: WebKit/bridge integration, official REST/upload integration, authentication helpers, and shared errors.
+- `Tunes/Resources`: the versioned JavaScript adapter and bundled third-party license.
+- `TunesTests` and `Scripts`: Swift unit/network tests and Node bridge protocol tests.
+
+These directories belong to one app target. See [Architecture and code navigation](Docs/Architecture.md) for dependencies, state ownership, key flows, and where to make changes; [Samply integration details](Docs/SamplyBackend.md) covers the external contracts.
+
 ## Implemented features
 
 - Web account status, a persistent sign-in window, and authorization pop-ups.
@@ -37,7 +47,7 @@ The planned browser sign-in flow uses official authorization: Tunes starts autho
 
 ## Verification
 
-Automated verification uses builds, unit tests, and protocol tests only:
+Automated verification uses builds, unit tests, and protocol tests only. Repository documentation, comments, test descriptions, and app-owned text are maintained in English; user-provided names retain their original text.
 
 ```sh
 xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \

@@ -1,16 +1,4 @@
 import Foundation
-import SwiftUI
-
-private struct SamplyPageKey: FocusedValueKey {
-    typealias Value = SamplyPage
-}
-
-extension FocusedValues {
-    var samplyPage: SamplyPage? {
-        get { self[SamplyPageKey.self] }
-        set { self[SamplyPageKey.self] = newValue }
-    }
-}
 
 enum SamplyPage: Equatable, Sendable {
     case library

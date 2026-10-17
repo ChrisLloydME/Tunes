@@ -1,5 +1,7 @@
 # Samply integration
 
+See [Architecture.md](Architecture.md) for the overall directory layout, state ownership, and call flows. This document focuses on Samply integration contracts. The coordinator lives in `Tunes/App/SamplyBackend.swift`; web and REST implementations live in `Tunes/Samply/Web/` and `Tunes/Samply/REST/` respectively.
+
 ## Components
 
 | Component | Responsibility |

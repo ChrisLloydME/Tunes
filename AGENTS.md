@@ -1,5 +1,7 @@
 # Project requirements
 
+- Keep all repository documentation, source comments, test descriptions, and app-owned text in English. User-provided project, track, and file names retain their original text.
+
 - Never use Computer Use, browser automation, accessibility control, or UI test runners to validate this project. Use builds and unit/protocol tests; provide instructions for the user to verify the UI and live Samply flows manually.
 - Never launch the app and capture screenshots to validate its UI, whether through Xcode, shell commands, screenshot tools, or any other method. Do not use screenshots or visual inspection of a running app as a substitute for Computer Use. UI verification must be performed manually by the user; hosted unit tests remain allowed without visual inspection or screenshots.
 - Debug app bundle identifier is `com.lloydME.Tunes.beta`. Release is `com.lloydME.Tunes`. Keep Debug/Release web sessions isolated. Check identifiers before building or launching.

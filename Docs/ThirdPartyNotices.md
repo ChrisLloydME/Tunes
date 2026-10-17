@@ -13,18 +13,18 @@ Tunes uses source from [Kaset](https://github.com/sozercan/kaset),
 revision `83513f6da059fd6b5e8816b2ae734be3475ca5a9` (MIT).
 The license is also included in the app bundle as `Kaset-LICENSE.txt`.
 
-- `Tunes/LibraryView.swift`: album card layout adapted from
+- `Tunes/Features/Library/LibraryView.swift`: album card layout adapted from
   `Sources/Kaset/Views/LibraryView.swift`.
-- `Tunes/Album/AlbumDetailView.swift`: directly adapted the album branch of
+- `Tunes/Features/Album/AlbumDetailView.swift`: directly adapted the album branch of
   `Sources/Kaset/Views/PlaylistDetailView.swift` and its
   `PlaylistDetailView+HeaderActions.swift`. Preserves the single lazy scroll stack,
   180-point cover, header typography/spacing, Play button style, and track dividers.
   Removed queue editing, playlist management, likes, AI refinement, pinning, and
   artist navigation. Optional uploads and alternate versions live in secondary menus.
-- `Tunes/Album/AlbumTrackRow.swift`: copied the album branch of
+- `Tunes/Features/Album/AlbumTrackRow.swift`: copied the album branch of
   `Sources/Kaset/Views/PlaylistTrackRow.swift`, replacing YouTube song/player data
   with Samply state and removing likes, explicit badges, and artist links.
-- `Tunes/Album/Kaset/`: copied `AccentBackground.swift`, `TopFade.swift`,
+- `Tunes/Features/Album/Kaset/`: copied `AccentBackground.swift`, `TopFade.swift`,
   `SharedViews/DetailContentLayout.swift`, `SharedViews/EqualizerView.swift`,
   and the row style from `SharedViews/InteractiveCardStyle.swift`.
   Copied the palette extraction code from `Utilities/ColorExtractor.swift` with
@@ -33,13 +33,13 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
   Tunes uses its theme accent for interactive controls. Palette extraction retains
   bright saturated artwork pixels, ignores transparent pixels, and uses a neutral
   fallback instead of borrowing the system accent.
-- `Tunes/Playback/PlayerBar.swift`: directly adapted from
+- `Tunes/Features/Playback/PlayerBar.swift`: directly adapted from
   `Sources/Kaset/Views/PlayerBar.swift`. Preserves the glass container, fixed
   section widths, compact breakpoint, transport/volume placement, timeline,
   margins, artwork glow, marquee, and volume capsule. Samply supplies playback
   data and commands. Unsupported account actions, AirPlay, shuffle/repeat, lyrics,
   queue, video, mini player, and artist/album resolution were removed.
-- `Tunes/Playback/Kaset/`: copied `PlayerBarIconButton`, `PlayerBarIconMenu`,
+- `Tunes/Features/Playback/Kaset/`: copied `PlayerBarIconButton`, `PlayerBarIconMenu`,
   `PlayerBarMarqueeText`, `PlayerBarMetadataLink`, `PlayerBarArtworkView`,
   `PlayerBarArtworkGlow`, `PlayerBarProgressLane`, `PlayerBarSliderVisuals`,
   `PlayerBarSliderLoadingShimmer`, `PlayerBarVerticalSlider`,
