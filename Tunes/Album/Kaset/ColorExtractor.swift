@@ -1,5 +1,5 @@
 // From Kaset, MIT license; see Docs/ThirdPartyNotices.md.
-// Uses the existing Tunes memory-only artwork cache; removed the upstream cache wrapper.
+// Uses the Tunes memory-only artwork cache, neutral fallback, and corrected pixel filtering.
 import AppKit
 import CoreGraphics
 import SwiftUI
@@ -25,18 +25,17 @@ enum ColorExtractor {
         /// Light mode tint color (lighter, pastel).
         let lightTint: Color
 
-        /// Default adaptive palette when no image is available.
+        /// Neutral palette when no artwork color is available; independent of the UI accent.
         static let `default` = ColorPalette(
             primary: Color(nsColor: NSColor(white: 0.15, alpha: 1)),
             secondary: Color(nsColor: NSColor(white: 0.08, alpha: 1)),
-            lightTint: Color(nsColor: NSColor.controlAccentColor).opacity(0.3)
+            lightTint: .clear
         )
     }
 
     /// Returns an image-derived palette for a URL, reusing a shared cache so accent
     /// backgrounds across detail views do not redownload or re-extract the same
-    /// artwork. `targetSize` is expressed in display points; `ImageCache` applies
-    /// the Retina multiplier while downsampling.
+    /// artwork. The image cache remains in memory for this process only.
     static func cachedPalette(
         for url: URL,
         targetSize: CGSize = CGSize(width: 64, height: 64)
@@ -46,7 +45,7 @@ enum ColorExtractor {
     }
 
     /// Extracts a color palette from an NSImage.
-    /// Uses k-means clustering on downsampled image for performance.
+    /// Uses saturation-weighted sampling of a small image for performance.
     /// - Parameter image: The source image.
     /// - Returns: A ColorPalette with primary and secondary colors.
     static func extractPalette(from image: NSImage) -> ColorPalette {
@@ -74,9 +73,12 @@ enum ColorExtractor {
         for yCoord in 0 ..< sampleSize {
             for xCoord in 0 ..< sampleSize {
                 let offset = (yCoord * sampleSize + xCoord) * 4
-                let red = CGFloat(pointer[offset]) / 255.0
-                let green = CGFloat(pointer[offset + 1]) / 255.0
-                let blue = CGFloat(pointer[offset + 2]) / 255.0
+                let alpha = CGFloat(pointer[offset + 3]) / 255.0
+                guard alpha > 0.05 else { continue }
+                // The bitmap is premultiplied RGBA. Restore the color before sampling hue.
+                let red = min(1, CGFloat(pointer[offset]) / 255.0 / alpha)
+                let green = min(1, CGFloat(pointer[offset + 1]) / 255.0 / alpha)
+                let blue = min(1, CGFloat(pointer[offset + 2]) / 255.0 / alpha)
 
                 // Weight by saturation and avoid near-black/white pixels
                 let maxC = max(red, green, blue)
@@ -84,9 +86,11 @@ enum ColorExtractor {
                 let saturation = maxC > 0 ? (maxC - minC) / maxC : 0
                 let brightness = maxC
 
-                // Skip very dark or very light pixels
-                if brightness > 0.1, brightness < 0.95 {
-                    let weight = saturation * 0.7 + 0.3
+                // A bright channel also occurs in vivid red/orange/blue artwork.
+                // Exclude near-white pixels only when they also have little saturation.
+                let isNearWhite = brightness > 0.95 && saturation < 0.1
+                if brightness > 0.1, !isNearWhite {
+                    let weight = (saturation * 0.7 + 0.3) * alpha
                     colors.append(WeightedColor(red: red, green: green, blue: blue, weight: weight))
                 }
             }
@@ -145,8 +149,8 @@ enum ColorExtractor {
             height: height,
             bitsPerComponent: 8,
             bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
         )
     }
 

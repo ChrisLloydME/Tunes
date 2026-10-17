@@ -1,5 +1,5 @@
 // From Kaset, MIT license; see Docs/ThirdPartyNotices.md.
-// Preview-only code removed.
+// Preview-only code removed; clear the previous palette before loading different artwork.
 import SwiftUI
 
 // MARK: - AccentBackground
@@ -71,8 +71,9 @@ struct AccentBackground: View {
     }
 
     private func loadPalette() async {
+        self.palette = .default
+        self.isLoaded = false
         guard let url = imageURL else {
-            self.palette = .default
             self.isLoaded = true
             return
         }
