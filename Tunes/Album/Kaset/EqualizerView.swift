@@ -29,7 +29,7 @@ struct EqualizerView: NSViewRepresentable {
     var cornerRadius: CGFloat = 1.5
 
     /// Bar color.
-    var color: Color = .red
+    var color: Color = .accentColor
 
     func makeNSView(context _: Context) -> EqualizerBarsView {
         EqualizerBarsView()
@@ -259,7 +259,7 @@ struct NowPlayingIndicator: View {
                     spacing: 2,
                     barWidth: 3,
                     cornerRadius: 1.5,
-                    color: .red
+                    color: .accentColor
                 )
             } else {
                 Image(systemName: "speaker.fill")

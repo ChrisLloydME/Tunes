@@ -5,7 +5,7 @@
 import SwiftUI
 
 struct PlayerBar: View {
-    private static let brandAccent = Color("PlayerAccent")
+    private static let accent = Color.accentColor
     private static let fullSongInfoWidth: CGFloat = 234
     private static let compactSongInfoWidth: CGFloat = 116
 
@@ -175,7 +175,7 @@ struct PlayerBar: View {
         ZStack(alignment: .top) {
             PlayerBarProgressLane(
                 fraction: self.displayFraction,
-                accent: Self.brandAccent,
+                accent: Self.accent,
                 elapsedText: self.isSeeking
                     ? self.formatTime(self.seekValue * self.state.duration)
                     : self.formattedProgress,
@@ -275,7 +275,7 @@ struct PlayerBar: View {
 
                 PlayerBarVerticalSlider(
                     value: self.$volumeValue,
-                    accent: Self.brandAccent,
+                    accent: Self.accent,
                     accessibilityIdentifier: "playerBar.volumeSlider",
                     accessibilityLabel: String(localized: "Volume"),
                     onEditingChanged: { editing in

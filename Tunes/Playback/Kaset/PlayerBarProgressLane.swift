@@ -74,7 +74,7 @@ struct PlayerBarProgressLane: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 4) {
                 Circle()
-                    .fill(.red)
+                    .fill(self.accent)
                     .frame(width: 5, height: 5)
 
                 Text("LIVE")

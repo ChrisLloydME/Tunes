@@ -39,7 +39,7 @@ struct AlbumTrackRow<Menu: View>: View {
                 HStack(spacing: 6) {
                     Text(self.track.name)
                         .font(.system(size: 14))
-                        .foregroundStyle(isCurrent ? .red : .primary)
+                        .foregroundStyle(isCurrent ? Color.accentColor : .primary)
                         .lineLimit(1)
                         .accessibilityHidden(true)
                 }

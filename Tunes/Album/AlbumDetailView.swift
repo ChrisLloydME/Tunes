@@ -43,7 +43,7 @@ struct AlbumDetailView: View {
         .frame(minWidth: 0, maxWidth: .infinity, minHeight: 0, maxHeight: .infinity)
         .accentBackground(from: item.artwork.flatMap(URL.init(string:)))
         .toolbarBackgroundVisibility(.hidden, for: .automatic)
-        .tint(Color("PlayerAccent"))
+        .tint(.accentColor)
         .disabled(backend.isPlayingSelection)
         .sheet(item: $versionTrack) { track in
             AlbumVersionsView(backend: backend, track: track)
