@@ -55,6 +55,15 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
+test('page initialization has a distinct retryable error and recovers without reinstalling the adapter', async () => {
+    const f = fixture();
+    const querySelector = f.context.document.querySelector;
+    f.context.document.querySelector = () => null;
+    await assert.rejects(f.bridge.command('snapshot'), error => error.code === 'TUNES_NOT_READY');
+    f.context.document.querySelector = querySelector;
+    assert.equal((await f.bridge.command('snapshot')).account.uid, 'user-a');
+});
+
 test('session restoration stays checking until a real or anonymous identity resolves', async () => {
     const f = fixture();
     f.stores.delete('profile-auth-module');

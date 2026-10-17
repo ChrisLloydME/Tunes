@@ -13,7 +13,11 @@
     function globals() {
         const app = document.querySelector('#app')?.__vue_app__;
         const g = app?.config?.globalProperties;
-        if (!g?.$pinia?._s || !g?.$router) throw new Error('Samply Vue/Pinia application is not ready or has changed.');
+        if (!g?.$pinia?._s || !g?.$router) {
+            const error = new Error('Samply Vue/Pinia application is not ready or has changed.');
+            error.code = 'TUNES_NOT_READY';
+            throw error;
+        }
         return g;
     }
     const store = id => globals().$pinia._s.get(id);

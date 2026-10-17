@@ -15,6 +15,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private var popupWindows: [NSWindow] = []
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var hasStarted = false
+    @ObservationIgnored private var bridgeHealth = SamplyBridgeHealth()
     @ObservationIgnored private let script: String
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
 
@@ -94,7 +95,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func refresh() async {
-        guard !isSigningOut, webView.url?.host == "samply.app", webView.url?.scheme == "https" else { return }
+        guard !isSigningOut, !webView.isLoading,
+              webView.url?.host == "samply.app", webView.url?.scheme == "https" else { return }
         let stamp = generation
         do {
             let state: WebSnapshot = try await call("snapshot")
@@ -103,9 +105,12 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             guard state.version == 1 else { throw SamplyError.invalidResponse }
             snapshot = state
             authenticationState = state.authenticationState
+            bridgeHealth.reset()
             connectionError = nil
         } catch {
-            guard generation == stamp else { return }
+            guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return }
+            if error is SamplyBridgeError,
+               !bridgeHealth.recordFailure(at: ProcessInfo.processInfo.systemUptime) { return }
             connectionError = error.localizedDescription
         }
     }
@@ -114,18 +119,34 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard !isSigningOut, !script.isEmpty, webView.url?.host == "samply.app",
               webView.url?.scheme == "https" else { throw SamplyError.bridgeUnavailable }
         let stamp = generation
-        let result = try await webView.callAsyncJavaScript("""
+        let result: Any?
+        do {
+            result = try await webView.callAsyncJavaScript("""
+            try {
             if (!window.__tunesSamply) { \(script) }
             if (!window.__tunesSamply) throw new Error('Samply adapter unavailable.');
-            return JSON.stringify(await window.__tunesSamply.command(command, args));
+            return JSON.stringify({payload: await window.__tunesSamply.command(command, args)});
+            } catch (error) {
+                // Never send arbitrary page exception text (which can contain URLs or credentials).
+                return JSON.stringify({failure: error?.code === 'TUNES_NOT_READY' ? 'notReady' : 'executionFailed'});
+            }
             """, arguments: ["command": command, "args": arguments], in: nil, contentWorld: .page)
+        } catch {
+            guard generation == stamp, !isSigningOut else { throw CancellationError() }
+            throw SamplyBridgeError.executionFailed
+        }
         guard generation == stamp, !isSigningOut else { throw CancellationError() }
         guard let value = result as? String, let data = value.data(using: .utf8) else { throw SamplyError.invalidResponse }
-        return try JSONDecoder().decode(T.self, from: data)
+        let response = try JSONDecoder().decode(SamplyBridgeResponse<T>.self, from: data)
+        if response.failure == "notReady" { throw SamplyBridgeError.notReady }
+        if response.failure != nil { throw SamplyBridgeError.executionFailed }
+        guard let payload = response.payload else { throw SamplyError.invalidResponse }
+        return payload
     }
 
     func signOut() async {
         isSigningOut = true
+        bridgeHealth.reset()
         authenticationState = .checking
         generation += 1
         snapshot = nil
@@ -143,8 +164,11 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         window?.orderOut(nil)
     }
 
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if webView === self.webView { connectionError = nil }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        generation += 1
+        bridgeHealth.reset()
+        connectionError = nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -162,6 +186,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === self.webView else { return }
         generation += 1
         snapshot = nil
         authenticationState = .checking
@@ -204,4 +229,9 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         if sender === window { sender.orderOut(nil); return false }
         return true
     }
+}
+
+private struct SamplyBridgeResponse<Payload: Decodable>: Decodable {
+    let payload: Payload?
+    let failure: String?
 }
