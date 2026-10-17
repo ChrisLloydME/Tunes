@@ -1,5 +1,12 @@
 # Third-party notices
 
+## About page design reference
+
+The independent About Tunes window uses AudioMator's About page as a visual
+layout reference (Christopher Lloyd; user-provided `AudioMator-main.zip`, archive
+revision `e9deb6b0a0f468ff32a6467477a851dcefa74ea4`). The Tunes implementation
+uses its own app information, release summary, privacy text, and acknowledgements.
+
 ## Kaset
 
 Tunes uses source from [Kaset](https://github.com/sozercan/kaset),

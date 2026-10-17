@@ -10,6 +10,7 @@ struct TunesApp: App {
         }
         .defaultSize(width: 1100, height: 760)
         .commands {
+            AboutTunesCommands()
             CommandMenu("Samply") {
                 Button("Open Samply Sign-In and Player") { backend.web.showWindow() }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
@@ -17,6 +18,15 @@ struct TunesApp: App {
                     .keyboardShortcut("r", modifiers: .command)
             }
         }
+        Window("About Tunes", id: "about") {
+            AboutTunesView()
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowBackgroundDragBehavior(.enabled)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
         Settings { ConnectionView(backend: backend) }
     }
 }
