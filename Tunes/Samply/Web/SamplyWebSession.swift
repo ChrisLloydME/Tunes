@@ -6,6 +6,7 @@ import WebKit
 @MainActor
 @Observable
 final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
+    let profile: SamplyProfileCache
     private(set) var snapshot: WebSnapshot?
     private(set) var connectionError: String?
     private(set) var isSigningOut = false
@@ -23,6 +24,9 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
 
     override init() {
+        let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
+            NSClassFromString("XCTestCase") != nil
+        profile = SamplyProfileCache(defaults: isTesting ? nil : .standard)
         // App-specific cookie/IndexedDB storage. Never read Safari/Chromium credentials.
         #if DEBUG
         let storeID = "110C778D-236A-4F13-A27C-9A85F4CAB40D"
@@ -109,6 +113,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             guard generation == stamp else { return false }
             // A newer/different contract must never silently drive the native library.
             guard state.version == 1 else { throw SamplyError.invalidResponse }
+            profile.accept(state.account, authentication: state.authenticationState)
             snapshot = state
             authenticationState = state.authenticationState
             bridgeHealth.reset()
@@ -158,6 +163,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func signOut() async {
+        profile.clear()
         isSigningOut = true
         bridgeHealth.reset()
         authenticationState = .checking

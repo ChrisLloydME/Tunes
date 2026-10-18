@@ -30,6 +30,12 @@ struct ContentView: View {
                     .accessibilityAction { showsProject = false }
             }
             .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let account = backend.web.profile.account {
+                    SidebarProfileView(account: account, avatarData: backend.web.profile.avatarData)
+                        .id(account.uid)
+                }
+            }
             .onKeyPress(.return) {
                 showsProject = false
                 return .handled

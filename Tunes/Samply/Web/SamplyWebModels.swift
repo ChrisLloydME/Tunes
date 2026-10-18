@@ -57,6 +57,7 @@ struct WebSnapshot: Codable, Sendable {
     struct Account: Codable, Equatable, Sendable {
         let uid: String
         var name: String?
+        var avatarURL: String?
     }
     let version: Int
     var account: Account?

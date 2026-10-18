@@ -47,7 +47,8 @@
     function account() {
         const auth = store('profile-auth-module');
         if (!auth?.uid || auth.isAnonymous !== false) return null;
-        return { uid: auth.uid, name: text(auth.userSnippet?.displayName) };
+        return { uid: auth.uid, name: text(auth.userSnippet?.displayName),
+            avatarURL: text(auth.userSnippet?.photoURL) };
     }
     function authenticationState(auth) {
         if (auth) return 'signedIn';

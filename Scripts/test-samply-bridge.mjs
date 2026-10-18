@@ -75,6 +75,19 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 
+test('profile snapshot includes only display metadata and tolerates missing profile fields', async () => {
+    const f = fixture();
+    f.auth.userSnippet = {displayName: '测试 Artist', photoURL: 'https://example.test/avatar.png',
+        email: 'private@example.test', accessToken: 'NEVER_SERIALIZE_THIS'};
+    assert.deepEqual(plain((await f.bridge.command('snapshot')).account), {
+        uid: 'user-a', name: '测试 Artist', avatarURL: 'https://example.test/avatar.png'
+    });
+    delete f.auth.userSnippet;
+    assert.deepEqual(plain((await f.bridge.command('snapshot')).account), {uid: 'user-a'});
+    f.auth.isAnonymous = true;
+    assert.equal((await f.bridge.command('snapshot')).account, null);
+});
+
 test('page initialization has a distinct retryable error and recovers without reinstalling the adapter', async () => {
     const f = fixture();
     const querySelector = f.context.document.querySelector;

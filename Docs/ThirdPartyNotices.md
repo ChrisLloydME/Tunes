@@ -13,6 +13,9 @@ Tunes uses source from [Kaset](https://github.com/sozercan/kaset),
 revision `83513f6da059fd6b5e8816b2ae734be3475ca5a9` (MIT).
 The license is also included in the app bundle as `Kaset-LICENSE.txt`.
 
+- `Tunes/Features/Library/SidebarProfileView.swift`: profile layout adapted from
+  `Sources/Kaset/Views/SidebarProfileView.swift`, using Samply display metadata,
+  cached avatar loading, and a static name without account switching.
 - `Tunes/Features/Library/LibraryView.swift`: album card layout adapted from
   `Sources/Kaset/Views/LibraryView.swift`.
 - `Tunes/Features/Album/AlbumDetailView.swift`: directly adapted the album branch of

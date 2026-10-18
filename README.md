@@ -35,7 +35,7 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Web account status, a persistent sign-in window, and authorization pop-ups.
 - Email sign-in links opened in the existing WebKit session, including email-provider redirects.
 - Web Library browsing, including owned projects and shared players.
-- A Library-only sidebar and a Kaset-based album grid with artwork, title and artist search, and project details.
+- A Library sidebar with the signed-in Samply avatar and display name, and a Kaset-based album grid with artwork, title and artist search, and project details.
 - Album detail pages adapted from Kaset, with artwork, artist, track count and duration, a Play action, numbered tracks, and folder browsing.
 - Track versions in track menus, uploads in album menus, and playback bar components reused from Kaset.
 - Track selection and streaming through Samply's own `audio-module.loadBox`, with play, pause, seek, volume, and previous/next controls.

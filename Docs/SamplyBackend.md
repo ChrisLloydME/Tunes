@@ -70,3 +70,7 @@ Not implemented: resumable uploads, system background transfers, failed-ticket c
 - [Samply Projects](https://docs.samply.app/api/projects.html)
 - [Samply Files](https://docs.samply.app/api/files.html)
 - [Kaset architecture reference](https://github.com/sozercan/kaset/blob/main/docs/architecture.md): persistent WebKit playback with separate native state. The Library album grid and floating player layout are also adapted from Kaset; see [ThirdPartyNotices.md](ThirdPartyNotices.md) for provenance and the MIT license.
+
+## Profile display cache
+
+`SamplyProfileCache` stores only account display metadata and avatar image bytes in the app's UserDefaults domain. Debug and Release bundle identifiers keep these caches separate. The sidebar can show this metadata during session restoration; it never establishes authentication or enables playback. Confirmed sign-out and explicit sign-out clear the cache. Account or avatar URL changes discard old image data. Default avatars use Samply's name initials and UID-based color algorithm. No credentials enter this cache.
