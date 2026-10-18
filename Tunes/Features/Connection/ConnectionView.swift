@@ -9,10 +9,18 @@ struct ConnectionView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("Connect to Samply").font(.title2.weight(.semibold))
+            Text("Samply Account").font(.title2.weight(.semibold))
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
-                    if backend.isCheckingSession {
+                    if backend.web.isSigningOut {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Signing out of Samply")
+                            Text("Signing out…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if backend.isCheckingSession {
                         HStack(spacing: 10) {
                             ProgressView()
                                 .controlSize(.small)
@@ -20,15 +28,29 @@ struct ConnectionView: View {
                             Text("Loading your Samply session…")
                                 .foregroundStyle(.secondary)
                         }
+                    } else if backend.isConnected {
+                        Text("Signed in to Samply").font(.headline)
+                        if let name = backend.web.snapshot?.account?.name, !name.isEmpty {
+                            Text(name)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                        }
+                        Text("Signing out stops playback and removes this app's session and upload token.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Open Samply Window") { backend.web.showWindow() }
+                            Spacer()
+                            Button("Sign Out", role: .destructive) { signOut() }
+                                .accessibilityIdentifier("signOutSamply")
+                        }
                     } else {
-                        Text(backend.isConnected ? "Signed in to Samply" : "Sign in to your Samply account").font(.headline)
+                        Text("Sign in to your Samply account").font(.headline)
                         Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
                             .foregroundStyle(.secondary)
-                        Button(backend.isConnected ? "Open Samply Window" : "Sign In to Samply") { backend.web.showWindow() }
-                        if !backend.isConnected {
-                            Divider()
-                            EmailSignInLinkView(session: backend.web)
-                        }
+                        Button("Sign In to Samply") { backend.web.showWindow() }
+                        Divider()
+                        EmailSignInLinkView(session: backend.web)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
             }
@@ -57,14 +79,19 @@ struct ConnectionView: View {
             }
             if let message { Text(message).font(.callout).textSelection(.enabled) }
             HStack {
-                Button("Sign Out", role: .destructive) { Task { await backend.signOut() } }
-                    .disabled(backend.web.isSigningOut)
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
         .padding(24).frame(width: 540)
-        .disabled(isSaving)
+        .disabled(isSaving || backend.web.isSigningOut)
+    }
+
+    private func signOut() {
+        guard !backend.web.isSigningOut else { return }
+        token = ""
+        message = nil
+        Task { await backend.signOut() }
     }
 
     private func save() {
