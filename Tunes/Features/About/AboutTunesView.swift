@@ -113,11 +113,7 @@ private struct AboutInformationSheet: View {
                 VStack(alignment: .leading, spacing: 20) {
                     switch page {
                     case .releaseNotes:
-                        section("Current Development Build", text: "Browse your Samply library in a native album grid, open folders, and play available track versions.")
-                        section("Playback", text: "Control playback, seek, and adjust volume from the player bar. Tunes supports macOS Now Playing and media keys; Samply provides authenticated streaming.")
-                        section("Connection and Uploads", text: "Sign in through the app's Samply window, including by pasting the official email sign-in link. Optional original-file uploads use a personal access token saved locally on this Mac.")
-                        Text("These notes describe the current implementation. Live playback and upload flows require manual verification.")
-                            .foregroundStyle(.secondary)
+                        ReleaseNotesView()
 
                     case .acknowledgements:
                         section("Kaset", text: "Tunes adapts Kaset's album browsing and player components. Kaset is released under the MIT License.")
