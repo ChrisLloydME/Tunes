@@ -14,7 +14,7 @@ Open `Tunes.xcodeproj` in Xcode, select the Tunes scheme, Debug configuration, a
 - The project retains its original macOS 27 deployment target.
 - Personal access tokens remain in process memory and are discarded when the app exits. Application code does not access the Keychain.
 
-Click **Sign In to Samply** to open a sign-in sheet inside the current Tunes window. Close it with the close button or Escape; successful authentication dismisses it automatically. **Open in Samply** continues to open the independent Samply window. Both presentations share the background player's WKWebView without reloading when it moves between hosts. The session is stored in the WebKit container for the corresponding build configuration.
+Click **Sign In to Samply** to open a sign-in sheet inside the current Tunes window. Close it with the close button or Escape; successful authentication dismisses it automatically. **Open in Samply** continues to open the independent Samply window. Both presentations share the background player's WKWebView. Reopening the sign-in sheet while signed out returns to the sign-in entry page; opening a pasted email link preserves that link's navigation. The independent player window retains its current page. The session is stored in the WebKit container for the corresponding build configuration.
 
 For email sign-in, request the email from that window, copy the complete link from the email's sign-in button, and click **Paste Sign-In Link** in Tunes. Tunes reads the clipboard only when you click this button and opens the link immediately. For manual entry, expand **Enter link manually** in settings, or click the options button in the Samply window's floating glass capsule. Paste the link into the field and click **Continue Sign-In**. These controls are available in connection settings and the top of the sign-in window. The link opens unchanged in the existing Samply session so Samply can complete authentication. Redirect links from Outlook, Gmail, and other email providers are passed through unchanged, without inspecting their domain, path, or parameters.
 
@@ -56,4 +56,4 @@ xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \
 node --test Scripts/test-samply-bridge.mjs
 ```
 
-Tests use in-memory credentials and simulated network and web objects. They do not sign in to real accounts or upload files to cloud storage. See manual verification instructions provided in chat for manual checks and [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.
+Tests use in-memory credentials and simulated network and web objects. They do not sign in to real accounts or upload files to cloud storage. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.

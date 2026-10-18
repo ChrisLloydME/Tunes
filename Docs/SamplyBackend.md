@@ -61,7 +61,7 @@ Not implemented: resumable uploads, system background transfers, failed-ticket c
 
 - Unit tests: real URLSession with URLProtocol-simulated API/storage, covering paths, authentication, models, original-file tickets, upload completion, cancellation, errors, retries, and in-memory tokens.
 - Node protocol tests: simulate Vue/Pinia contracts confirmed from the public source, covering shared Library content, controls, track selection, navigation, version permissions, stale state, and errors.
-- Acceptance does not use Computer Use or UI tests. Real-account end-to-end verification is performed manually by the user following manual verification instructions provided in chat.
+- Acceptance does not use Computer Use or UI tests. Real-account end-to-end verification is performed manually by the user with instructions provided in chat.
 
 ## Sources
 

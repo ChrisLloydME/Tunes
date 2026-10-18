@@ -37,7 +37,7 @@ Tunes/
 TunesTests/                     Swift unit and simulated-network tests
 Scripts/test-samply-bridge.mjs   Node bridge protocol tests
 TunesUITests/                   Legacy Xcode UI test template; excluded from project validation
-Docs/                           Architecture, integration constraints, manual checks, and attribution
+Docs/                           Architecture, integration constraints, and attribution
 ```
 
 Xcode uses `PBXFileSystemSynchronizedRootGroup` to collect source files automatically. These moves do not require individual file-reference changes in `project.pbxproj`; place new Swift files in the appropriate responsibility directory. `Resources/SamplyBridge.js` keeps its path so the app can load it by resource name and Node tests can read it.
@@ -171,7 +171,7 @@ See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation,
 
 Build and test commands are in the [README](../README.md#verification). Run only `TunesTests` and Node protocol tests. `TunesUITests` is a legacy template containing app-launch code; do not run it. Computer Use, browser automation, UI tests, and screenshots of the running app are prohibited for validation.
 
-The user must manually verify real Samply sign-in, shared content, playback, seeking, and uploads using manual verification instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
+The user must manually verify real Samply sign-in, shared content, playback, seeking, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
 
 ## When to split responsibilities further
 

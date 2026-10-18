@@ -80,14 +80,27 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func showSignIn() {
+        presentSignIn(resetPage: true)
+    }
+
+    private func presentSignIn(resetPage: Bool) {
         guard !isSigningOut else { return }
         if let signInWindow {
             signInWindow.makeKeyAndOrderFront(nil)
             return
         }
         guard let parent = NSApp.keyWindow ?? NSApp.mainWindow, parent !== window else { return }
+        let restartsSignIn = resetPage && hasStarted && snapshot?.account == nil
         start()
         makeWindowIfNeeded()
+        if restartsSignIn {
+            generation += 1
+            authenticationState = .checking
+            connectionError = nil
+            webView.stopLoading()
+            webView.load(URLRequest(url: URL(string: "https://samply.app/library")!,
+                                    cachePolicy: .reloadIgnoringLocalCacheData))
+        }
         window?.orderOut(nil)
         // Only one host may own the live player WebView at a time.
         window?.contentView = nil
@@ -138,7 +151,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         hasStarted = true
         makeWindowIfNeeded()
         webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
-        if signInWindow == nil { showSignIn() }
+        // Present the email link already loading, without resetting it to the sign-in entry page.
+        if signInWindow == nil { presentSignIn(resetPage: false) }
     }
 
     private func makeWindowIfNeeded() {
