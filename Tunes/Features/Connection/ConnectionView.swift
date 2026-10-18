@@ -13,7 +13,13 @@ struct ConnectionView: View {
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     if backend.isCheckingSession {
-                        ProgressView("Loading your Samply session…")
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .accessibilityLabel("Loading your Samply session")
+                            Text("Loading your Samply session…")
+                                .foregroundStyle(.secondary)
+                        }
                     } else {
                         Text(backend.isConnected ? "Signed in to Samply" : "Sign in to your Samply account").font(.headline)
                         Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
