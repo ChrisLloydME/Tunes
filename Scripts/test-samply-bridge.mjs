@@ -122,6 +122,39 @@ test('session restoration stays checking until a real or anonymous identity reso
     assert.equal((await f.bridge.command('snapshot')).authentication, 'signedIn');
 });
 
+test('completed session restoration with no user is signed out after relaunch', async () => {
+    const f = fixture();
+    const profile = {uid: null, isAnonymous: null, onAuthFired: false};
+    f.stores.set('profile-auth-module', profile);
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'checking');
+    profile.onAuthFired = true;
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.authentication, 'signedOut');
+    assert.equal(snapshot.account, null);
+    assert.equal(snapshot.libraryReady, false);
+    assert.deepEqual(plain(snapshot.library), []);
+    assert.equal(snapshot.playback, null);
+
+    // A later sign-in must recover in the same document without resetting the adapter.
+    Object.assign(profile, {uid: 'user-a', isAnonymous: false});
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'signedIn');
+    Object.assign(profile, {uid: null, isAnonymous: null});
+    assert.equal((await f.bridge.command('snapshot')).authentication, 'signedOut');
+});
+
+test('missing or incomplete auth readiness does not falsely expire a restoring session', async () => {
+    const f = fixture();
+    for (const profile of [
+        {uid: null, isAnonymous: null},
+        {uid: null, isAnonymous: null, onAuthFired: 'true'},
+        {uid: null, isAnonymous: false, onAuthFired: true},
+        {uid: 'user-a', isAnonymous: null, onAuthFired: true}
+    ]) {
+        f.stores.set('profile-auth-module', profile);
+        assert.equal((await f.bridge.command('snapshot')).authentication, 'checking');
+    }
+});
+
 // Samply normally invokes this callback from requestAnimationFrame, which WebKit
 // can suspend while the app-owned web window is hidden. No animation frames run here.
 function installMediaClock(f, {gapless = false} = {}) {

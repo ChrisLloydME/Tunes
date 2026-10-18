@@ -54,8 +54,12 @@
         if (auth) return 'signedIn';
         const profile = store('profile-auth-module');
         // A missing UID is also the initial state while Samply restores its session.
-        // Only a resolved anonymous identity confirms that sign-in is needed.
-        return profile?.uid && profile.isAnonymous === true ? 'signedOut' : 'checking';
+        // The inspected profile store marks onAuthFired after its initial auth check,
+        // including a null user. Read that flag without calling authentication SDKs.
+        if (profile?.uid && profile.isAnonymous === true) return 'signedOut';
+        if (profile?.onAuthFired === true && !profile.uid && profile.isAnonymous === null)
+            return 'signedOut';
+        return 'checking';
     }
     function assertAccount() {
         if (!account()) throw operationError('Sign in to Samply in the web window first.');
