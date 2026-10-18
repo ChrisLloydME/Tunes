@@ -1,11 +1,15 @@
 # Third-party notices
 
-## About page design reference
+## AudioMator design reference
 
 The independent About Tunes window uses AudioMator's About page as a visual
 layout reference (Christopher Lloyd; user-provided `AudioMator-main.zip`, archive
 revision `e9deb6b0a0f468ff32a6467477a851dcefa74ea4`). The Tunes implementation
 uses its own app information, release summary, privacy text, and acknowledgements.
+
+The Settings window also follows the user-provided AudioMator Settings reference:
+native icon tabs, section headings, and rounded setting groups with inset dividers.
+Tunes keeps its own account and upload controls, with About in a separate window.
 
 ## Kaset
 

@@ -1,90 +1,185 @@
 import SwiftUI
 
+/// Settings layout inspired by the user-provided AudioMator reference.
 struct ConnectionView: View {
     @Bindable var backend: SamplyBackend
-    @Environment(\.dismiss) private var dismiss
     @State private var token = ""
     @State private var isSaving = false
     @State private var message: String?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Samply Account").font(.title2.weight(.semibold))
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    if backend.web.isSigningOut {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                                .controlSize(.small)
-                                .accessibilityLabel("Signing out of Samply")
-                            Text("Signing out…")
-                                .foregroundStyle(.secondary)
-                        }
-                    } else if backend.isCheckingSession {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                                .controlSize(.small)
-                                .accessibilityLabel("Loading your Samply session")
-                            Text("Loading your Samply session…")
-                                .foregroundStyle(.secondary)
-                        }
-                    } else if backend.isConnected {
-                        Text("Signed in to Samply").font(.headline)
-                        if let name = backend.web.snapshot?.account?.name, !name.isEmpty {
-                            Text(name)
-                                .font(.callout)
-                                .textSelection(.enabled)
-                        }
-                        Text("Signing out stops playback and removes this app's session and upload token.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        HStack {
-                            Button("Open Samply Window") { backend.web.showWindow() }
-                            Spacer()
-                            Button("Sign Out", role: .destructive) { signOut() }
-                                .accessibilityIdentifier("signOutSamply")
-                        }
-                    } else {
-                        Text("Sign in to your Samply account").font(.headline)
-                        Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
-                            .foregroundStyle(.secondary)
-                        Button("Sign In to Samply") { backend.web.showSignIn() }
-                        Divider()
+        TabView {
+            settingsPage(
+                title: "Account Settings",
+                detail: "Manage your Samply account and playback session."
+            ) {
+                accountSection
+                if !backend.isConnected && !backend.isCheckingSession && !backend.web.isSigningOut {
+                    ConnectionSettingsSection(title: "Email Sign-In") {
                         EmailSignInLinkView(session: backend.web)
+                            .padding(18)
                     }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                }
             }
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Personal Access Token (Optional)").font(.headline)
-                    Text("Uploads require a token from the same Samply account. It stays in memory until you quit Tunes.")
+            .tabItem { Label("Account", systemImage: "person.crop.circle") }
+
+            settingsPage(
+                title: "Upload Settings",
+                detail: "Connect a personal access token to upload original files."
+            ) {
+                tokenSection
+                ConnectionSettingsSection(title: "Token Storage") {
+                    ConnectionSettingsRow(
+                        title: "This Session Only",
+                        detail: "Your token stays in memory and is cleared when you quit Tunes or sign out.",
+                        systemImage: "lock"
+                    ) {
+                        EmptyView()
+                    }
+                }
+                if let message {
+                    Text(message)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        SecureField("Paste your Samply token", text: $token)
-                            .onSubmit { save() }
-                        Button("Verify and Save") { save() }.disabled(token.isEmpty || isSaving)
-                    }
-                    HStack {
-                        Button("Create Token") { backend.web.openTokenPreferences() }
-                        if backend.hasToken {
-                            Text("Token saved for this session").foregroundStyle(.secondary)
-                            Button("Remove Token") {
-                                do { try backend.removeToken(); message = "Token removed." }
-                                catch { message = error.localizedDescription }
-                            }
-                        }
-                        if isSaving { ProgressView().controlSize(.small) }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .accessibilityLabel(message)
+                }
             }
-            if let message { Text(message).font(.callout).textSelection(.enabled) }
-            HStack {
-                Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
+            .tabItem { Label("Uploads", systemImage: "arrow.up.circle") }
+        }
+        .frame(width: 700, height: 560)
+        .disabled(isSaving || backend.web.isSigningOut)
+        .onDisappear { token = "" }
+    }
+
+    private func settingsPage<Content: View>(
+        title: String,
+        detail: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                        .accessibilityAddTraits(.isHeader)
+                    Text(detail)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                content()
+            }
+            .padding(24)
+            .padding(.bottom, 12)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var accountSection: some View {
+        ConnectionSettingsSection {
+            if backend.web.isSigningOut {
+                ConnectionSettingsRow(title: "Signing out…", systemImage: "person.crop.circle") {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Signing out of Samply")
+                }
+            } else if backend.isCheckingSession {
+                ConnectionSettingsRow(title: "Loading your Samply session…", systemImage: "person.crop.circle") {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Loading your Samply session")
+                }
+            } else if backend.isConnected {
+                ConnectionSettingsRow(
+                    title: "Signed in to Samply",
+                    detail: accountName,
+                    systemImage: "person.crop.circle"
+                ) {
+                    Button("Open Samply Window") { backend.web.showWindow() }
+                }
+                ConnectionSettingsDivider()
+                ConnectionSettingsRow(
+                    title: "Sign Out",
+                    detail: "Stop playback and remove this app's session and upload token.",
+                    systemImage: "rectangle.portrait.and.arrow.right"
+                ) {
+                    Button("Sign Out", role: .destructive) { signOut() }
+                        .accessibilityIdentifier("signOutSamply")
+                }
+            } else {
+                ConnectionSettingsRow(
+                    title: "Sign In to Samply",
+                    detail: "Browse your library and play music with your Samply account.",
+                    systemImage: "person.crop.circle"
+                ) {
+                    Button("Sign In") { backend.web.showSignIn() }
+                }
+            }
+            ConnectionSettingsDivider()
+            ConnectionSettingsRow(
+                title: "Playback Session",
+                detail: "Playback continues when you close the Samply window.",
+                systemImage: "play.rectangle"
+            ) {
+                EmptyView()
             }
         }
-        .padding(24).frame(width: 540)
-        .disabled(isSaving || backend.web.isSigningOut)
+    }
+
+    private var accountName: String? {
+        guard let name = backend.web.snapshot?.account?.name, !name.isEmpty else { return nil }
+        return name
+    }
+
+    private var tokenSection: some View {
+        ConnectionSettingsSection(title: "Personal Access Token") {
+            ConnectionSettingsRow(
+                title: backend.hasToken ? "Token Added" : "Optional Upload Access",
+                detail: backend.hasToken
+                    ? "A verified token is available for this session."
+                    : "Uploads require a token from the same Samply account.",
+                systemImage: "key"
+            ) {
+                Button("Create Token") { backend.web.openTokenPreferences() }
+            }
+            ConnectionSettingsDivider()
+            VStack(alignment: .leading, spacing: 10) {
+                Text(backend.hasToken ? "Replace Token" : "Add Token")
+                    .font(.body.weight(.medium))
+                HStack(spacing: 12) {
+                    SecureField("Paste your Samply token", text: $token)
+                        .textFieldStyle(.roundedBorder)
+                        .privacySensitive()
+                        .onSubmit { save() }
+                    if isSaving {
+                        ProgressView()
+                            .controlSize(.small)
+                            .accessibilityLabel("Verifying token")
+                    }
+                    Button("Verify and Save") { save() }
+                        .disabled(token.isEmpty || isSaving)
+                }
+            }
+            .padding(.leading, 54)
+            .padding(.trailing, 18)
+            .padding(.vertical, 16)
+            if backend.hasToken {
+                ConnectionSettingsDivider()
+                ConnectionSettingsRow(
+                    title: "Remove Token",
+                    detail: "Disable uploads for this session. Library playback stays available.",
+                    systemImage: "minus.circle"
+                ) {
+                    Button("Remove Token", role: .destructive) {
+                        token = ""
+                        do { try backend.removeToken(); message = "Token removed." }
+                        catch { message = error.localizedDescription }
+                    }
+                }
+            }
+        }
     }
 
     private func signOut() {
@@ -105,5 +200,67 @@ struct ConnectionView: View {
             catch { message = error.localizedDescription }
             isSaving = false
         }
+    }
+}
+
+private struct ConnectionSettingsSection<Content: View>: View {
+    var title: String? = nil
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let title {
+                Text(title)
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                content
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.secondary.opacity(0.09), in: RoundedRectangle(cornerRadius: 14))
+        }
+    }
+}
+
+private struct ConnectionSettingsRow<Action: View>: View {
+    let title: String
+    var detail: String? = nil
+    let systemImage: String
+    @ViewBuilder let action: Action
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18))
+                .foregroundStyle(.secondary)
+                .frame(width: 22)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.body.weight(.medium))
+                if let detail {
+                    Text(detail)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            action
+                .controlSize(.small)
+                .fixedSize()
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 16)
+    }
+}
+
+private struct ConnectionSettingsDivider: View {
+    var body: some View {
+        Divider()
+            .padding(.leading, 54)
+            .padding(.trailing, 18)
     }
 }
