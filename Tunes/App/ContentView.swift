@@ -144,19 +144,35 @@ struct ContentView: View {
         if backend.isCheckingSession {
             ProgressView("Loading your Samply session…")
         } else if !backend.isConnected {
-            ContentUnavailableView {
-                Label("Connect to Samply", systemImage: "waveform")
-            } description: {
-                Text("Sign in to listen to your music.")
-            } actions: {
-                VStack(spacing: 20) {
-                    Button("Sign In to Samply") { backend.web.showWindow() }
-                        .buttonStyle(.borderedProminent)
-                        .accessibilityIdentifier("connectSamply")
-                    EmailSignInLinkView(session: backend.web)
-                        .frame(maxWidth: 440)
+            ScrollView {
+                VStack(spacing: 28) {
+                    VStack(spacing: 12) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 40, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                            .padding(.bottom, 8)
+                        Text("Your music starts here")
+                            .font(.largeTitle.weight(.semibold))
+                        Text("Connect to Samply to browse your library and listen.")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                    .multilineTextAlignment(.center)
+
+                    Button { backend.web.showWindow() } label: {
+                        Text("Sign In to Samply")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .accessibilityIdentifier("connectSamply")
                 }
+                .frame(maxWidth: 400)
+                .padding(40)
+                .frame(maxWidth: .infinity, minHeight: 440)
             }
+            .defaultScrollAnchor(.center)
         } else if showsProject, let item = backend.selectedItem {
             AlbumDetailView(backend: backend, item: item) {
                 if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
