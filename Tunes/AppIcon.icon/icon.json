@@ -13,11 +13,18 @@
             "scale" : 1,
             "translation-in-points" : [
               1,
-              -1
+              -1.0000000000001137
             ]
           }
         }
       ],
+      "position" : {
+        "scale" : 0.9,
+        "translation-in-points" : [
+          0,
+          0
+        ]
+      },
       "refractivity" : {
         "depth" : 0,
         "enabled" : false,
