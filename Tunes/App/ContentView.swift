@@ -160,7 +160,7 @@ struct ContentView: View {
                     }
                     .multilineTextAlignment(.center)
 
-                    Button { backend.web.showWindow() } label: {
+                    Button { backend.web.showSignIn() } label: {
                         Text("Sign In to Samply")
                             .frame(maxWidth: .infinity)
                     }

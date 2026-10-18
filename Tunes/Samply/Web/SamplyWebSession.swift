@@ -11,13 +11,16 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     private(set) var connectionError: String?
     private(set) var isSigningOut = false
     private(set) var authenticationState: WebAuthenticationState = .checking
+    private(set) var pageBackgroundColor = NSColor.windowBackgroundColor
     @ObservationIgnored let webView: WKWebView
     @ObservationIgnored private var window: NSWindow?
+    @ObservationIgnored private var signInWindow: NSWindow?
     @ObservationIgnored private var popupWindows: [NSWindow] = []
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var hasStarted = false
     @ObservationIgnored private var bridgeHealth = SamplyBridgeHealth()
     @ObservationIgnored private var isRefreshingSnapshot = false
+    @ObservationIgnored private var pageBackgroundObservation: NSKeyValueObservation?
 
     var pollInterval: Duration { bridgeHealth.pollInterval(at: ProcessInfo.processInfo.systemUptime) }
     @ObservationIgnored private let script: String
@@ -46,6 +49,13 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        pageBackgroundColor = webView.underPageBackgroundColor
+        pageBackgroundObservation = webView.observe(\.underPageBackgroundColor, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pageBackgroundColor = self.webView.underPageBackgroundColor
+            }
+        }
         #if DEBUG
         webView.isInspectable = true
         #endif
@@ -64,8 +74,50 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     func showWindow() {
         start()
         makeWindowIfNeeded()
+        dismissSignIn()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func showSignIn() {
+        guard !isSigningOut else { return }
+        if let signInWindow {
+            signInWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        guard let parent = NSApp.keyWindow ?? NSApp.mainWindow, parent !== window else { return }
+        start()
+        makeWindowIfNeeded()
+        window?.orderOut(nil)
+        // Only one host may own the live player WebView at a time.
+        window?.contentView = nil
+        let sheet = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 620),
+                             styleMask: [.titled, .fullSizeContentView], backing: .buffered, defer: false)
+        sheet.title = "Sign In to Samply"
+        sheet.titleVisibility = .hidden
+        sheet.titlebarAppearsTransparent = true
+        sheet.titlebarSeparatorStyle = .none
+        sheet.isReleasedWhenClosed = false
+        sheet.contentView = NSHostingView(rootView: SamplyWebWindowView(session: self, isSignIn: true))
+        signInWindow = sheet
+        parent.beginSheet(sheet) { [weak self, weak sheet] _ in
+            guard let self, let sheet else { return }
+            self.restorePlayerHost(after: sheet)
+        }
+    }
+
+    func dismissSignIn() {
+        guard let sheet = signInWindow else { return }
+        sheet.sheetParent?.endSheet(sheet)
+        restorePlayerHost(after: sheet)
+    }
+
+    private func restorePlayerHost(after sheet: NSWindow) {
+        guard signInWindow === sheet else { return }
+        sheet.orderOut(nil)
+        sheet.contentView = nil
+        signInWindow = nil
+        window?.contentView = NSHostingView(rootView: SamplyWebWindowView(session: self))
     }
 
     func openTokenPreferences() {
@@ -86,14 +138,17 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         hasStarted = true
         makeWindowIfNeeded()
         webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
-        showWindow()
+        if signInWindow == nil { showSignIn() }
     }
 
     private func makeWindowIfNeeded() {
         guard window == nil else { return }
-        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable],
+        let window = NSWindow(contentRect: webView.frame, styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
                               backing: .buffered, defer: false)
         window.title = "Samply · Sign-In and Player"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: SamplyWebWindowView(session: self))
         window.delegate = self
@@ -116,6 +171,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             profile.accept(state.account, authentication: state.authenticationState)
             snapshot = state
             authenticationState = state.authenticationState
+            if state.authenticationState == .signedIn { dismissSignIn() }
             bridgeHealth.reset()
             connectionError = nil
             return true
@@ -163,6 +219,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func signOut() async {
+        dismissSignIn()
         profile.clear()
         isSigningOut = true
         bridgeHealth.reset()

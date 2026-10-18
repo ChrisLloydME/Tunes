@@ -4,17 +4,44 @@ import WebKit
 /// Keeps the email-link entry beside the same WebKit session that requested the email.
 struct SamplyWebWindowView: View {
     @Bindable var session: SamplyWebSession
+    var isSignIn = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            if session.snapshot?.account == nil {
-                EmailSignInLinkView(session: session).padding(16)
-                Divider()
+        SamplyBrowserView(webView: session.webView)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+            .overlay(alignment: .topLeading) {
+                if isSignIn {
+                    Color(nsColor: session.pageBackgroundColor)
+                        .frame(width: 88, height: 88)
+                        .contentShape(Rectangle())
+                        // Block clicks to the webpage's covered navigation button.
+                        .onTapGesture { }
+                        .accessibilityHidden(true)
+                }
             }
-            SamplyBrowserView(webView: session.webView)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(minWidth: 620, minHeight: 480)
+            .overlay(alignment: .topTrailing) {
+                if isSignIn || session.snapshot?.account == nil {
+                    HStack(alignment: .top) {
+                        if isSignIn {
+                            Button { session.dismissSignIn() } label: {
+                                Image(systemName: "xmark")
+                                    .frame(width: 32, height: 32)
+                            }
+                            .buttonStyle(.plain)
+                            .compatGlass(interactive: true, in: .circle)
+                            .accessibilityLabel("Close sign-in")
+                            .help("Close sign-in")
+                            .keyboardShortcut(.cancelAction)
+                        }
+                        Spacer()
+                        EmailSignInLinkView(session: session, usesCapsule: true)
+                    }
+                    .padding(.top, 12)
+                    .padding(.horizontal, 16)
+                }
+            }
+            .frame(minWidth: 620, minHeight: 480)
     }
 }
 

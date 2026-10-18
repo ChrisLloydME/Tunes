@@ -48,7 +48,7 @@ struct ConnectionView: View {
                         Text("Sign in to your Samply account").font(.headline)
                         Text("Sign in to browse your library and play music. Playback continues when you close the Samply window.")
                             .foregroundStyle(.secondary)
-                        Button("Sign In to Samply") { backend.web.showWindow() }
+                        Button("Sign In to Samply") { backend.web.showSignIn() }
                         Divider()
                         EmailSignInLinkView(session: backend.web)
                     }
