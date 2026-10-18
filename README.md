@@ -45,6 +45,18 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
+## Local signing
+
+Tunes is currently built for local development and personal use with the owner's free Apple developer account (Personal Team). Debug, Release, and test targets all use automatic signing with `Apple Development` and the existing team `YM5G2M8PV9`. Release selects optimized code; it does not imply Developer ID distribution or notarization. Neither Developer ID signing nor notarization is part of this workflow.
+
+Keep this signing policy for both Xcode and command-line builds. Do not override it with ad hoc signing (`CODE_SIGN_IDENTITY=-`), `CODE_SIGNING_ALLOWED=NO`, a different team, or a replacement certificate to make a build pass. Missing, expired, or inaccessible signing credentials are a build prerequisite failure, not permission to change identity. Report the failure and let the owner manage the existing Personal Team in Xcode. Do not automatically provision, create, revoke, import, or export certificates or modify Apple account credentials.
+
+Xcode and Apple's signing tools may use the existing signing identity through their normal credential handling. Tunes application code must never access Keychain. Builds and hosted unit tests must use a temporary Derived Data directory and must not replace an installed app. Hosted tests may start their test host; UI tests and visual inspection remain prohibited. A change from an earlier ad hoc build can still cause macOS to request confirmation once; this policy does not guarantee the absence of future system prompts.
+
+Debug remains `com.lloydME.Tunes.beta`; Release remains `com.lloydME.Tunes`, with separate app and WebKit storage.
+
+References: [Apple developer account and Personal Team](https://developer.apple.com/help/account/basics/about-your-developer-account), [Developer ID certificates](https://developer.apple.com/help/account/certificates/create-developer-id-certificates/).
+
 ## Verification
 
 Automated verification uses builds, unit tests, and protocol tests only. Repository documentation, comments, test descriptions, and app-owned text are maintained in English; user-provided names retain their original text.
@@ -52,7 +64,7 @@ Automated verification uses builds, unit tests, and protocol tests only. Reposit
 ```sh
 xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \
   -destination 'platform=macOS,arch=arm64' -derivedDataPath /tmp/TunesDerivedData \
-  CODE_SIGNING_ALLOWED=NO -only-testing:TunesTests test
+  -only-testing:TunesTests -skip-testing:TunesUITests test
 node --test Scripts/test-samply-bridge.mjs
 ```
 
