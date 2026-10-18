@@ -18,6 +18,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private var popupWindows: [NSWindow] = []
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private var hasStarted = false
+    @ObservationIgnored private let sessionHistory: SamplySessionHistory
+    @ObservationIgnored private var isCheckingStoredData = false
     @ObservationIgnored private var bridgeHealth = SamplyBridgeHealth()
     @ObservationIgnored private var isRefreshingSnapshot = false
     @ObservationIgnored private var pageBackgroundObservation: NSKeyValueObservation?
@@ -30,6 +32,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil
         profile = SamplyProfileCache(defaults: isTesting ? nil : .standard)
+        sessionHistory = SamplySessionHistory(defaults: isTesting ? nil : .standard)
         // App-specific cookie/IndexedDB storage. Never read Safari/Chromium credentials.
         #if DEBUG
         let storeID = "110C778D-236A-4F13-A27C-9A85F4CAB40D"
@@ -47,6 +50,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         config.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1100, height: 780), configuration: config)
         super.init()
+        authenticationState = sessionHistory.initialAuthenticationState
         webView.navigationDelegate = self
         webView.uiDelegate = self
         pageBackgroundColor = webView.underPageBackgroundColor
@@ -63,6 +67,31 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
 
     func start() {
         guard !hasStarted, !isSigningOut else { return }
+        if let wasSignedIn = sessionHistory.wasSignedIn {
+            if wasSignedIn { loadSession() }
+            return
+        }
+        guard !isCheckingStoredData else { return }
+        isCheckingStoredData = true
+        let stamp = generation
+        // Older installs have no startup hint. Check only this build's WebKit store,
+        // preserving existing sessions without contacting Samply on a fresh install.
+        dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { [weak self] records in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isCheckingStoredData = false
+                guard self.generation == stamp, !self.hasStarted, !self.isSigningOut else { return }
+                if self.sessionHistory.shouldRestoreLegacySession(hasWebsiteData: !records.isEmpty) {
+                    self.loadSession()
+                } else {
+                    self.authenticationState = .signedOut
+                }
+            }
+        }
+    }
+
+    private func loadSession() {
+        guard !hasStarted, !isSigningOut else { return }
         hasStarted = true
         authenticationState = .checking
         // Keep the same WKWebView attached to an app-owned window even when ordered out.
@@ -72,7 +101,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func showWindow() {
-        start()
+        loadSession()
         makeWindowIfNeeded()
         dismissSignIn()
         window?.makeKeyAndOrderFront(nil)
@@ -91,7 +120,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         }
         guard let parent = NSApp.keyWindow ?? NSApp.mainWindow, parent !== window else { return }
         let restartsSignIn = resetPage && hasStarted && snapshot?.account == nil
-        start()
+        loadSession()
         makeWindowIfNeeded()
         if restartsSignIn {
             generation += 1
@@ -134,7 +163,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func openTokenPreferences() {
-        start()
+        loadSession()
         webView.load(URLRequest(url: URL(string: "https://samply.app/preferences/api")!))
         showWindow()
     }
@@ -183,6 +212,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             // A newer/different contract must never silently drive the native library.
             guard state.version == 1 else { throw SamplyError.invalidResponse }
             profile.accept(state.account, authentication: state.authenticationState)
+            sessionHistory.accept(state.authenticationState)
             snapshot = state
             authenticationState = state.authenticationState
             if state.authenticationState == .signedIn { dismissSignIn() }
@@ -249,6 +279,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         // Remove IndexedDB (Firebase auth), cookies, caches and service workers together.
         await dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
         hasStarted = false
+        sessionHistory.accept(.signedOut)
         authenticationState = .signedOut
         isSigningOut = false
         window?.orderOut(nil)
