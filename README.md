@@ -12,7 +12,7 @@ Open `Tunes.xcodeproj` in Xcode, select the Tunes scheme, Debug configuration, a
 - Release bundle identifier: `com.lloydME.Tunes`.
 - Debug and Release use separate WebKit website data stores.
 - The project retains its original macOS 27 deployment target.
-- Personal access tokens remain in process memory and are discarded when the app exits. Application code does not access the Keychain.
+- Personal access tokens are saved in a local plaintext file with restricted permissions, excluded from backups, and restored only for the matching Samply web account. Application code does not access the Keychain.
 
 Click **Sign In to Samply** to open a sign-in sheet inside the current Tunes window. Close it with the close button or Escape; successful authentication dismisses it automatically. **Open in Samply** continues to open the independent Samply window. Both presentations share the background player's WKWebView. Reopening the sign-in sheet while signed out returns to the sign-in entry page; opening a pasted email link preserves that link's navigation. The independent player window retains its current page. The session is stored in the WebKit container for the corresponding build configuration.
 
@@ -43,7 +43,7 @@ These directories belong to one app target. See [Architecture and code navigatio
 - macOS Now Playing integration and media keys.
 - Official REST integration for owned projects, project files, folders, stacks, signed download URL queries, and original-file upload tickets.
 - Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states.
-- Cleanup of native state, in-memory tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
+- Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
 ## Verification
 
@@ -56,4 +56,4 @@ xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \
 node --test Scripts/test-samply-bridge.mjs
 ```
 
-Tests use in-memory credentials and simulated network and web objects. They do not sign in to real accounts or upload files to cloud storage. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.
+Tests use fixture credentials in memory or temporary directories, plus simulated network and web objects. They do not sign in to real accounts or upload files to cloud storage. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.

@@ -12,7 +12,8 @@ See [Architecture.md](Architecture.md) for the overall directory layout, state o
 | PlaybackController | Transport controls, playback state, MPRemoteCommandCenter / Now Playing |
 | SamplyAPI | Official REST requests and error mapping; bounded backoff retries for GET |
 | SamplyUploader | Upload tickets, streamed file PUTs, progress, and cancellation |
-| MemoryTokenStore | In-process credentials; no Keychain, file, or preferences access |
+| FileTokenStore | Account-bound plaintext credentials in Application Support; 0700 directory, 0600 file, excluded from backups; no Keychain or preferences access |
+| MemoryTokenStore | In-process credentials for isolated tests |
 
 API `GET /projects` **lists owned projects only**, so it cannot represent the complete Library. The full Library and playback therefore use the authenticated web session. PATs are used only for the official API, primarily original-file uploads in the current UI. The two credentials remain independent; web account changes clear the old PAT.
 
@@ -59,7 +60,7 @@ Not implemented: resumable uploads, system background transfers, failed-ticket c
 
 ## Verification boundaries
 
-- Unit tests: real URLSession with URLProtocol-simulated API/storage, covering paths, authentication, models, original-file tickets, upload completion, cancellation, errors, retries, and in-memory tokens.
+- Unit tests: real URLSession with URLProtocol-simulated API/storage, covering paths, authentication, models, original-file tickets, upload completion, cancellation, errors, retries, and file-backed token restoration, permissions, account isolation, and removal using temporary directories.
 - Node protocol tests: simulate Vue/Pinia contracts confirmed from the public source, covering shared Library content, controls, track selection, navigation, version permissions, stale state, and errors.
 - Acceptance does not use Computer Use or UI tests. Real-account end-to-end verification is performed manually by the user with instructions provided in chat.
 

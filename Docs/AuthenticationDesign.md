@@ -54,7 +54,7 @@ For a server-mediated flow, Tunes first creates a transaction with a random veri
 
 Cancellation, timeout, repeated callbacks, and cross-build callbacks must invalidate the transaction. Commit account state only after the initiating app redeems the result. Authorization must not silently replace another signed-in account. Failures must remain retryable without reporting false success.
 
-Keep the current Keychain restriction: application code does not access the local Keychain; API tokens remain in process memory, and each build's WebKit container manages its web session. If the official integration requires additional persistent credentials, redesign storage first rather than silently introducing Keychain access.
+Keep the current Keychain restriction: application code does not access the local Keychain; API tokens use the user-approved local plaintext file store with restricted permissions and matching-account restoration, and each build's WebKit container manages its web session. If the official integration requires additional persistent credentials, redesign storage first rather than silently introducing Keychain access.
 
 Handle Samply authorization only. Do not read browser cookies, long-lived refresh tokens, browser profiles, or Apple identity. Removed approaches must not return as fallback paths.
 

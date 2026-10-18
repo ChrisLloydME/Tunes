@@ -115,7 +115,7 @@ private struct AboutInformationSheet: View {
                     case .releaseNotes:
                         section("Current Development Build", text: "Browse your Samply library in a native album grid, open folders, and play available track versions.")
                         section("Playback", text: "Control playback, seek, and adjust volume from the player bar. Tunes supports macOS Now Playing and media keys; Samply provides authenticated streaming.")
-                        section("Connection and Uploads", text: "Sign in through the app's Samply window, including by pasting the official email sign-in link. Optional original-file uploads use a personal access token kept only for the current session.")
+                        section("Connection and Uploads", text: "Sign in through the app's Samply window, including by pasting the official email sign-in link. Optional original-file uploads use a personal access token saved locally on this Mac.")
                         Text("These notes describe the current implementation. Live playback and upload flows require manual verification.")
                             .foregroundStyle(.secondary)
 
@@ -131,7 +131,7 @@ private struct AboutInformationSheet: View {
                     case .privacy:
                         section("Samply Connection", text: "Tunes connects to Samply to sign in, load your library, and stream audio. Samply's pages and media infrastructure handle these requests and may contact their own service providers.")
                         section("Web Session", text: "The app's WebKit session stores website data to keep you signed in. Debug and Release builds use separate website data stores. Signing out clears the current build's Samply website data.")
-                        section("Credentials", text: "Personal access tokens stay in process memory until you remove them, sign out, or quit Tunes. Tunes does not access the local Keychain. Pasted email sign-in links are opened in the existing Samply web session and are not saved in app settings or logs.")
+                        section("Credentials", text: "Personal access tokens are saved in a local plaintext file with restricted permissions and restored for the same Samply account. Removing a token, signing out, or switching accounts deletes the saved file. Tunes does not access the local Keychain. Pasted email sign-in links are opened in the existing Samply web session and are not saved in app settings or logs.")
                         section("Optional Uploads", text: "When you choose Upload File, Tunes sends the original file to Samply's designated upload service. Tunes does not transcode the file or change Samply's access, download, or version permissions.")
                         section("External Links", text: "GitHub and release links open in your default browser. Opening About does not check for updates or request release information over the network.")
                     }

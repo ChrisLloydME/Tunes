@@ -26,7 +26,7 @@ Tunes/
 ├── Samply/
 │   ├── Web/                    WebKit session, bridge health, page targets, and snapshot models
 │   ├── REST/                   Official HTTP API, request/response models, and original-file uploads
-│   ├── Authentication/         In-memory TokenStore and email-link conversion
+│   ├── Authentication/         Account-bound file TokenStore and email-link conversion
 │   └── SamplyError.swift       Errors shared by both integration paths
 ├── Resources/
 │   ├── SamplyBridge.js         v1 adapter; sole entry point for undocumented web contracts
@@ -80,7 +80,7 @@ The diagram shows the main calls. Connection views also call `SamplyWebSession` 
 | `SamplyWebSession` | Main WebView, persistent website data store, sign-in window/pop-ups, authentication state, latest snapshot, and bridge health | WebKit navigation and bridge calls |
 | `PlaybackController` | Native playback snapshot, errors, and system media controls | Web playback snapshots and command results |
 | `SamplyUploader` | Single upload task, progress, status, and resulting box ID | Upload-ticket creation, file PUT, and delegate callbacks |
-| `MemoryTokenStore` | Optional PAT | Explicit user submission after API verification; process memory only |
+| `FileTokenStore` | Optional PAT | Explicit user submission after API verification; local plaintext file, restored only for a matching web account |
 | SwiftUI views | Search, presentations, temporary inputs, and interaction animations | User interaction and observable business state |
 
 The main coordinating objects use `@MainActor`; observable state uses Observation. Network and WebKit operations use `async/await`, and the upload delegate delivers progress to the main actor. Samply's media clock is authoritative for playback position; native dragging, hold gestures, and progress presentation must not become the source of truth for media state.
@@ -139,7 +139,7 @@ The player bar and media keys share `PlaybackController.perform`, sending play, 
 
 ### Optional original-file uploads
 
-`ConnectionView → backend.saveToken → SamplyAPI.projects(token:) → MemoryTokenStore` validates the PAT. `backend.chooseUpload` selects one original file and passes it to `SamplyUploader`:
+`ConnectionView → backend.saveToken → SamplyAPI.projects(token:) → FileTokenStore` validates the PAT. `backend.chooseUpload` selects one original file and passes it to `SamplyUploader`:
 
 1. Hold the file's security scope and read its size, modification time, and MIME type.
 2. Use the PAT to request an upload ticket from the official REST API; do not automatically replay the POST.
@@ -154,7 +154,7 @@ A successful PUT only confirms data submission; Samply may still be processing i
 - The bridge entry point is `window.__tunesSamply`, currently version 1. Snapshot polling checks the version; an unknown version must not silently drive native state. Arguments use `callAsyncJavaScript(arguments:)` rather than script interpolation.
 - The bridge installs only in Samply's HTTPS top-level document. Email-link navigation does not apply the bridge's origin checks.
 - The backend's `selectionGeneration` prevents stale selections from overwriting new pages; the web session's `generation` prevents old-document results from overwriting new navigation/sign-out; JavaScript's `operation` invalidates superseded navigation or track selection; the uploader's operation ID isolates upload callbacks. Preserve these checks when changing asynchronous flows.
-- Web exceptions map to fixed error categories across the bridge so arbitrary page errors cannot expose URLs containing credentials. PATs never enter JavaScript, files, preferences, or logs. Application code does not access the Keychain.
+- Web exceptions map to fixed error categories across the bridge so arbitrary page errors cannot expose URLs containing credentials. PATs are saved only in the dedicated local plaintext credential file, with a 0700 directory and 0600 file, excluded from backups and isolated by bundle identifier. They never enter JavaScript, preferences, or logs. Application code does not access the Keychain.
 
 See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation, and official REST behavior.
 
@@ -167,7 +167,7 @@ See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation,
 | Player bar and artwork | `Features/Playback/`, `Features/Album/Kaset/` | `PlayerBarSeekHoldTests`, `AlbumPaletteTests` + manual checks |
 | Web contracts, controls, refresh | `Resources/SamplyBridge.js`, `Samply/Web/` | Node protocol tests, `SamplyBridgeHealthTests`, `PlaybackRecoveryTests` |
 | Email sign-in and authentication state | `Features/Connection/`, `Samply/Authentication/`, `Samply/Web/` | `EmailSignInLinkTests` (in `TunesTests.swift`), `WebAuthenticationStateTests` |
-| REST, PATs, uploads | `Samply/REST/`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift` |
+| REST, PATs, uploads | `Samply/REST/`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift`; temporary-directory storage tests in `FileTokenStoreTests.swift` |
 
 Build and test commands are in the [README](../README.md#verification). Run only `TunesTests` and Node protocol tests. `TunesUITests` is a legacy template containing app-launch code; do not run it. Computer Use, browser automation, UI tests, and screenshots of the running app are prohibited for validation.
 

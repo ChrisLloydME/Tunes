@@ -1,13 +1,14 @@
 import Foundation
 
 enum SamplyError: LocalizedError {
-    case noToken, invalidToken, invalidIdentifier, invalidResponse, insecureURL
+    case noToken, noAccount, invalidToken, invalidIdentifier, invalidResponse, insecureURL
     case http(Int, retryAfter: TimeInterval?)
     case bridgeUnavailable, webContract(String), timedOut, fileChanged
 
     var errorDescription: String? {
         switch self {
         case .noToken: "Add a Samply Personal Access Token in Connection Settings first."
+        case .noAccount: "Sign in to Samply before saving an upload token."
         case .invalidToken: "Your token is invalid or expired. Update it in Connection Settings."
         case .invalidIdentifier: "Invalid Samply resource ID."
         case .invalidResponse: "Samply returned an unexpected response."

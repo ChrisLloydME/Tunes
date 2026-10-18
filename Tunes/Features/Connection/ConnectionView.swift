@@ -30,9 +30,9 @@ struct ConnectionView: View {
                 tokenSection
                 ConnectionSettingsSection(title: "Token Storage") {
                     ConnectionSettingsRow(
-                        title: "This Session Only",
-                        detail: "Your token stays in memory and is cleared when you quit Tunes or sign out.",
-                        systemImage: "lock"
+                        title: "Saved on This Mac",
+                        detail: "Your token is stored unencrypted on this Mac and restored automatically for this account. Signing out or removing the token deletes the saved copy.",
+                        systemImage: "internaldrive"
                     ) {
                         EmptyView()
                     }
@@ -138,8 +138,8 @@ struct ConnectionView: View {
             ConnectionSettingsRow(
                 title: backend.hasToken ? "Token Added" : "Optional Upload Access",
                 detail: backend.hasToken
-                    ? "A verified token is available for this session."
-                    : "Uploads require a token from the same Samply account.",
+                    ? "A verified token is saved on this Mac."
+                    : "Sign in, then add a token from the same Samply account.",
                 systemImage: "key"
             ) {
                 Button("Create Token") { backend.web.openTokenPreferences() }
@@ -159,7 +159,7 @@ struct ConnectionView: View {
                             .accessibilityLabel("Verifying token")
                     }
                     Button("Verify and Save") { save() }
-                        .disabled(token.isEmpty || isSaving)
+                        .disabled(token.isEmpty || isSaving || !backend.isConnected || backend.isCheckingSession)
                 }
             }
             .padding(.leading, 54)
@@ -169,7 +169,7 @@ struct ConnectionView: View {
                 ConnectionSettingsDivider()
                 ConnectionSettingsRow(
                     title: "Remove Token",
-                    detail: "Disable uploads for this session. Library playback stays available.",
+                    detail: "Delete the saved token from this Mac. Library playback stays available.",
                     systemImage: "minus.circle"
                 ) {
                     Button("Remove Token", role: .destructive) {
@@ -196,7 +196,7 @@ struct ConnectionView: View {
         let candidate = token
         token = ""
         Task {
-            do { try await backend.saveToken(candidate); message = "Token verified. It will be cleared when you quit Tunes." }
+            do { try await backend.saveToken(candidate); message = "Token verified and saved on this Mac." }
             catch { message = error.localizedDescription }
             isSaving = false
         }

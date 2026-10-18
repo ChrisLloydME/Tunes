@@ -28,9 +28,10 @@ final class SamplyBackend {
     @ObservationIgnored private var playTask: Task<Void, Never>?
     @ObservationIgnored private var selectionGeneration = 0
     @ObservationIgnored private var accountID: String?
+    @ObservationIgnored private var hasResolvedTokenAccount = false
 
     init(tokens: (any TokenStore)? = nil) {
-        let tokens = tokens ?? MemoryTokenStore()
+        let tokens = tokens ?? FileTokenStore.applicationStore()
         self.tokens = tokens
         let web = SamplyWebSession()
         self.web = web
@@ -66,17 +67,19 @@ final class SamplyBackend {
     private func acceptSnapshot() {
         guard let state = web.snapshot, state.authenticationState != .checking else { return }
         let newAccount = state.account?.uid
-        if newAccount != accountID {
+        if !hasResolvedTokenAccount || newAccount != accountID {
             invalidateSelection()
             library = []
             playback.clear()
             uploader.reset()
-            // A PAT is a separate credential. Do not silently reuse account A's PAT for B.
-            if accountID != nil {
-                do { try tokens.remove(); hasToken = false }
-                catch { recordFailure(error) }
-            }
+            // Restore only after identity resolves; never reuse account A's PAT for B.
+            hasToken = false
+            do {
+                try tokens.restore(for: newAccount)
+                hasToken = try tokens.read() != nil
+            } catch { recordFailure(error) }
             accountID = newAccount
+            hasResolvedTokenAccount = true
         }
         guard newAccount != nil else { return }
         if state.libraryReady { library = state.library }
@@ -183,6 +186,7 @@ final class SamplyBackend {
     }
 
     func saveToken(_ token: String) async throws {
+        guard isConnected, accountID != nil else { throw SamplyError.noAccount }
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else { throw SamplyError.invalidToken }
         // Validate before replacing a working credential. Never retain a rejected token.
@@ -198,8 +202,8 @@ final class SamplyBackend {
 
     func removeToken() throws {
         uploader.reset()
-        try tokens.remove()
         hasToken = false
+        try tokens.remove()
     }
 
     func chooseUpload() {
@@ -275,7 +279,8 @@ final class SamplyBackend {
         library = []
         playback.clear()
         uploader.reset()
-        do { try tokens.remove(); hasToken = false }
+        hasToken = false
+        do { try tokens.remove() }
         catch { recordFailure(error) }
         accountID = nil
         await web.signOut()
