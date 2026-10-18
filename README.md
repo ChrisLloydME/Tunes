@@ -11,7 +11,7 @@ Open `Tunes.xcodeproj` in Xcode, select the Tunes scheme, Debug configuration, a
 - Debug bundle identifier: `com.lloydME.Tunes.beta`.
 - Release bundle identifier: `com.lloydME.Tunes`.
 - Debug and Release use separate WebKit website data stores.
-- The project retains its original macOS 27 deployment target.
+- The minimum supported system is macOS 26.
 - Personal access tokens are saved in a local plaintext file with restricted permissions, excluded from backups, and restored only for the matching Samply web account. Application code does not access the Keychain.
 
 Click **Sign In to Samply** to open a sign-in sheet inside the current Tunes window. Close it with the close button or Escape; successful authentication dismisses it automatically. **Open in Samply** continues to open the independent Samply window. Both presentations share the background player's WKWebView. Reopening the sign-in sheet while signed out returns to the sign-in entry page; opening a pasted email link preserves that link's navigation. The independent player window retains its current page. The session is stored in the WebKit container for the corresponding build configuration.
