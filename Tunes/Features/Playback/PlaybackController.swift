@@ -6,16 +6,26 @@ import Observation
 @Observable
 final class PlaybackController {
     private(set) var state = WebPlayback.empty
+    private(set) var libraryItem: LibraryItem?
+    var artwork: String? { libraryItem?.artwork }
     private(set) var error: String?
     private(set) var hasTransientError = false
     @ObservationIgnored private let web: SamplyWebSession
+    @ObservationIgnored private var libraryItemFileID: String?
     @ObservationIgnored private var remoteTargets: [(MPRemoteCommand, Any)] = []
 
     init(web: SamplyWebSession) { self.web = web }
 
-    func apply(_ state: WebPlayback?) {
+    func apply(_ state: WebPlayback?, libraryItem: LibraryItem? = nil) {
         let hadPlayerError = self.state.error != nil
         self.state = state ?? .empty
+        if self.state.fileID == nil {
+            self.libraryItem = nil
+            libraryItemFileID = nil
+        } else if let libraryItem {
+            self.libraryItem = libraryItem
+            libraryItemFileID = self.state.fileID
+        }
         if let failure = state?.error {
             error = failure
             hasTransientError = false
@@ -26,8 +36,29 @@ final class PlaybackController {
         updateNowPlaying()
     }
 
+    func applySnapshot(_ snapshot: WebSnapshot) {
+        libraryItem = libraryItem.map { current in
+            snapshot.library.first { $0.id == current.id } ?? current
+        }
+        var resolvedItem: LibraryItem?
+        // Navigation alone must not replace the playing album. Resolve a new origin
+        // only for an unbound/new track that actually belongs to the loaded route.
+        if libraryItem == nil || snapshot.playback?.fileID != libraryItemFileID,
+           let fileID = snapshot.playback?.fileID, snapshot.boxesReady,
+           snapshot.boxes.contains(where: {
+               $0.id == fileID || $0.activeID == fileID || $0.childIDs.contains(fileID)
+           }),
+           let routeID = snapshot.routeID,
+           let match = snapshot.library.first(where: { $0.routeID == routeID }) {
+            resolvedItem = match
+        }
+        apply(snapshot.playback, libraryItem: resolvedItem)
+    }
+
     func clear() {
         state = .empty
+        libraryItem = nil
+        libraryItemFileID = nil
         error = nil
         hasTransientError = false
         updateNowPlaying()
@@ -36,7 +67,7 @@ final class PlaybackController {
     func perform(_ command: String, value: Any? = nil) async {
         do {
             let snapshot: WebSnapshot = try await web.call(command, arguments: value.map { ["value": $0] } ?? [:])
-            apply(snapshot.playback)
+            applySnapshot(snapshot)
             error = nil
             hasTransientError = false
         } catch is CancellationError { }

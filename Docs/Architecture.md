@@ -129,6 +129,8 @@ Track selection goes through `SamplyBackend.play`, which checks that the album i
 
 The player bar and media keys share `PlaybackController.perform`, sending play, pause, previous/next, seek, volume, and quality commands through the bridge. Command playback snapshots and subsequent polling update the same `PlaybackController.state`, which then updates `MPNowPlayingInfoCenter`. Tunes has no native decoder and does not extract streaming URLs or fall back to download URLs.
 
+The player bar's artwork and artwork glow use the playing `LibraryItem.artwork`, matching the Library card. Native track selection binds that Library entry to playback. Snapshot updates keep it independent of the currently browsed album, refresh its artwork when Library data changes, and can resolve a new playback origin when the playing file belongs to the loaded route. Clearing playback clears the binding. Embedded track artwork is not used as a fallback.
+
 ### Refresh and error recovery
 
 `SamplyPage` represents the Library, album, or folder target for both toolbar and menu actions. SwiftUI focus propagation lives in `App/SamplyPageFocus.swift`.

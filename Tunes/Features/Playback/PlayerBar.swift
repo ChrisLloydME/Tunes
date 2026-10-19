@@ -131,12 +131,12 @@ struct PlayerBar: View {
             width: 32,
             height: 32,
             cornerRadius: 6,
-            glowSources: self.state.artwork.flatMap(URL.init(string:)).map { [$0] } ?? [],
-            glowIdentity: self.state.fileID,
+            glowSources: self.playback.artwork.flatMap(URL.init(string:)).map { [$0] } ?? [],
+            glowIdentity: self.playback.artwork,
             glowTargetSize: CGSize(width: 64, height: 64),
             showsHoverOverlay: false
         ) {
-            ProjectArtwork(artwork: self.state.artwork, size: 32, cornerRadius: 6)
+            ProjectArtwork(artwork: self.playback.artwork, size: 32, cornerRadius: 6)
         }
         .accessibilityIdentifier("playerBar.thumbnail")
     }

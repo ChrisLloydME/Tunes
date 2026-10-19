@@ -83,7 +83,7 @@ final class SamplyBackend {
         }
         guard newAccount != nil else { return }
         if state.libraryReady { library = state.library }
-        playback.apply(state.playback)
+        playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
            state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id) {
             boxes = state.boxes
@@ -177,7 +177,7 @@ final class SamplyBackend {
                 ])
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
-                playback.apply(state.playback)
+                playback.apply(state.playback, libraryItem: selectedItem)
             } catch {
                 if generation == selectionGeneration, !Task.isCancelled { recordFailure(error) }
             }
