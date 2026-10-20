@@ -95,10 +95,8 @@ struct ContentView: View {
                 ToolbarItem {
                     if !showsProject {
                         Button { showNewProject = true } label: {
-                            Label("New Project", systemImage: "plus")
-                                .labelStyle(.iconOnly)
-                                .font(.system(size: 18, weight: .semibold))
-                                .frame(width: 24, height: 24)
+                            ToolbarControlIcon(title: "New Project", systemImage: "plus",
+                                               weight: .semibold)
                         }
                         .help("New Project")
                         .accessibilityLabel("New Project")
@@ -108,21 +106,16 @@ struct ContentView: View {
                 }
                 ToolbarItemGroup {
                     Button { Task { await backend.refresh(currentPage) } } label: {
-                        Label(currentPage.refreshLabel, systemImage: "arrow.clockwise")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 20, weight: .semibold))
-                            .imageScale(.small)
-                            .frame(width: 24, height: 24)
+                        ToolbarControlIcon(title: currentPage.refreshLabel,
+                                           systemImage: "arrow.clockwise",
+                                           weight: .semibold)
                     }
                     .help(currentPage.refreshLabel)
                     .accessibilityLabel(currentPage.refreshLabel)
                     .disabled(!backend.isConnected || backend.isRefreshing || backend.isBrowsing || backend.isPlayingSelection || backend.isOpeningSamply)
                     Button { Task { await backend.openInSamply(currentPage) } } label: {
-                        Label("Open in Samply", systemImage: "arrow.up.forward.app")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 20, weight: .medium))
-                            .imageScale(.medium)
-                            .frame(width: 24, height: 24)
+                        ToolbarControlIcon(title: "Open in Samply",
+                                           systemImage: "arrow.up.forward.app")
                     }
                     .help("Open in Samply")
                     .accessibilityLabel("Open in Samply")
@@ -224,4 +217,21 @@ struct ContentView: View {
         }
     }
 
+}
+
+private struct ToolbarControlIcon: View {
+    let title: String
+    let systemImage: String
+    var pointSize: CGFloat = 15
+    var weight: Font.Weight = .medium
+    var scale: Image.Scale = .medium
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .labelStyle(.iconOnly)
+            .font(.system(size: pointSize, weight: weight))
+            .imageScale(scale)
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+    }
 }
