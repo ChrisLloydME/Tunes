@@ -33,6 +33,7 @@ struct ProjectCreationTests {
 
         let first = Task { await coordinator.create(name: "First") }
         await waitUntil { api.isSuspended }
+        #expect(coordinator.blocksDismissal)
         let second = Task { await coordinator.create(name: "Second") }
         await Task.yield()
         #expect(api.names == ["First"])
@@ -126,6 +127,26 @@ struct ProjectCreationTests {
         #expect(web.calls.filter { $0.command == "refreshPage" }.count == 2)
     }
 
+    @Test func interruptedRefreshKeepsTheConfirmedProjectRetryable() async {
+        let web = StubCreationWeb(libraryResponses: [.failure(CancellationError())])
+        let api = StubProjectAPI(result: .success(project()))
+        let coordinator = ProjectCreationCoordinator(api: api, web: web)
+
+        await coordinator.create(name: "Album")
+
+        #expect(api.names.count == 1)
+        #expect(coordinator.createdProject?.project.id == "project-1")
+        guard case .created(_, .refreshFailed(let message)) = coordinator.state else {
+            Issue.record("Expected an interrupted refresh to remain a created state")
+            return
+        }
+        #expect(message.contains("interrupted"))
+        #expect(!coordinator.blocksDismissal)
+
+        coordinator.reset()
+        #expect(coordinator.createdProject?.project.id == "project-1")
+    }
+
     @Test func ambiguousNetworkFailureIsNeverResubmitted() async {
         let web = StubCreationWeb(libraryResponses: [.success(snapshot())])
         let api = StubProjectAPI(result: .failure(URLError(.timedOut)))
@@ -149,6 +170,12 @@ struct ProjectCreationTests {
             return
         }
         #expect(refreshed)
+
+        await coordinator.create(name: "Again")
+        #expect(api.names.count == 1)
+
+        coordinator.startOverAfterUncertainOutcome()
+        #expect(coordinator.state == .idle)
     }
 
     @Test func staleCompletionIsIgnoredAfterAccountChange() async {

@@ -59,6 +59,7 @@ final class ProjectCreationCoordinator {
     }
 
     private(set) var state: State = .idle
+    private(set) var isRefreshingAfterUncertain = false
     @ObservationIgnored private let api: any ProjectCreatingAPI
     @ObservationIgnored private let web: any ProjectCreationWebSession
     @ObservationIgnored private var operation = UUID()
@@ -75,7 +76,9 @@ final class ProjectCreationCoordinator {
         return false
     }
 
-    var blocksDismissal: Bool { isCreating }
+    var blocksDismissal: Bool {
+        isCreating || createdStage?.isBusy == true || isRefreshingAfterUncertain
+    }
 
     var createdProject: CreatedProject? {
         if case .created(let project, _) = state { return project }
@@ -87,11 +90,14 @@ final class ProjectCreationCoordinator {
         return nil
     }
 
+    var canOpenCreatedProject: Bool { createdProject?.openItem != nil }
+
     /// Starts exactly one POST /projects request. A blank name after trimming is
     /// rejected before any account or network work.
     func create(name: String) async {
         guard !isCreating else { return }
         if case .created = state { return }
+        if case .uncertain = state { return }
 
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -152,7 +158,8 @@ final class ProjectCreationCoordinator {
                         state = .created(created, .opened)
                         onProjectOpened?(item, opened)
                     } catch is CancellationError {
-                        return
+                        guard isCurrent(ticket, accountID: created.accountID) else { return }
+                        state = .created(created, .openFailed(Self.interruptedOpenMessage))
                     } catch {
                         guard isCurrent(ticket, accountID: created.accountID) else { return }
                         state = .created(created, .openFailed(Self.openFailureMessage(error)))
@@ -161,7 +168,8 @@ final class ProjectCreationCoordinator {
                     state = .created(created, .delayed)
                 }
             } catch is CancellationError {
-                return
+                guard isCurrent(ticket, accountID: created.accountID) else { return }
+                state = .created(created, .refreshFailed(Self.interruptedRefreshMessage))
             } catch {
                 guard isCurrent(ticket, accountID: created.accountID) else { return }
                 state = .created(created, .refreshFailed(Self.refreshFailureMessage(error)))
@@ -198,7 +206,8 @@ final class ProjectCreationCoordinator {
             state = .created(created, .opened)
             onProjectOpened?(item, opened)
         } catch is CancellationError {
-            return
+            guard isCurrent(ticket, accountID: created.accountID) else { return }
+            state = .created(created, .openFailed(Self.interruptedOpenMessage))
         } catch {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
             state = .created(created, .openFailed(Self.openFailureMessage(error)))
@@ -213,15 +222,21 @@ final class ProjectCreationCoordinator {
         state = .idle
     }
 
-    /// Clears a failed or completed sheet without touching an in-flight POST.
+    /// Clears a failed or completed sheet. A confirmed creation that still needs
+    /// a Library refresh or navigation is retained so it cannot become a duplicate.
     func reset() {
-        guard !isCreating else { return }
-        invalidate()
+        switch state {
+        case .idle, .failed, .created(_, .opened):
+            invalidate()
+        default:
+            return
+        }
     }
 
     /// Invalidates every in-flight result after sign-out or an account change.
     func invalidate() {
         operation = UUID()
+        isRefreshingAfterUncertain = false
         state = .idle
     }
 
@@ -239,7 +254,8 @@ final class ProjectCreationCoordinator {
                     state = .created(updated, .opened)
                     onProjectOpened?(item, opened)
                 } catch is CancellationError {
-                    return
+                    guard isCurrent(ticket, accountID: created.accountID) else { return }
+                    state = .created(updated, .openFailed(Self.interruptedOpenMessage))
                 } catch {
                     guard isCurrent(ticket, accountID: created.accountID) else { return }
                     state = .created(updated, .openFailed(Self.openFailureMessage(error)))
@@ -248,7 +264,8 @@ final class ProjectCreationCoordinator {
                 state = .created(created, .delayed)
             }
         } catch is CancellationError {
-            return
+            guard isCurrent(ticket, accountID: created.accountID) else { return }
+            state = .created(created, .refreshFailed(Self.interruptedRefreshMessage))
         } catch {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
             state = .created(created, .refreshFailed(Self.refreshFailureMessage(error)))
@@ -256,12 +273,15 @@ final class ProjectCreationCoordinator {
     }
 
     private func refreshAfterUncertainOutcome() async {
+        guard !isRefreshingAfterUncertain else { return }
         guard let accountID = web.accountID, !web.isSigningOut else {
             state = .uncertain("Sign in to Samply to refresh the Library.", canStartOver: false)
             return
         }
         let ticket = UUID()
         operation = ticket
+        isRefreshingAfterUncertain = true
+        defer { isRefreshingAfterUncertain = false }
         state = .uncertain("Refreshing Library…", canStartOver: false)
         do {
             guard try await completeLibrary(ticket: ticket,
@@ -269,7 +289,9 @@ final class ProjectCreationCoordinator {
             state = .uncertain("Library refreshed. Check the Library for the project before trying again.",
                                canStartOver: true)
         } catch is CancellationError {
-            return
+            guard isCurrent(ticket, accountID: accountID) else { return }
+            state = .uncertain("The Library refresh was interrupted. The project may already exist; refresh again before creating another.",
+                               canStartOver: false)
         } catch {
             guard isCurrent(ticket, accountID: accountID) else { return }
             state = .uncertain(Self.refreshFailureMessage(error) +
@@ -353,13 +375,18 @@ final class ProjectCreationCoordinator {
         return false
     }
 
+    private static let interruptedRefreshMessage =
+        "Project created, but the Library refresh was interrupted. Refresh Library to try again."
+    private static let interruptedOpenMessage =
+        "Project created, but opening it was interrupted. Try opening it again."
+
     private static func failureMessage(_ error: Error) -> String {
         if let samply = error as? SamplyError {
             switch samply {
             case .noToken:
-                return "Add a Samply Personal Access Token in Upload Settings before creating a project."
+                return "Add a Samply Personal Access Token in Settings > API Access before creating a project."
             case .invalidToken:
-                return "Your Samply token is invalid or expired. Update it in Upload Settings."
+                return "Your Samply token is invalid or expired. Update it in Settings > API Access."
             case .http(403, _):
                 return "Samply denied project creation. Check your account permissions."
             case .http(429, _):
