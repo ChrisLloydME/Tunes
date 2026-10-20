@@ -2,7 +2,7 @@
 
 ## Architectural approach
 
-Tunes is a native macOS client: SwiftUI/AppKit handle browsing and interaction, while a single app-owned `WKWebView` handles Samply sign-in and authenticated streaming. The complete Library, including shared content, comes from the web session. The official REST API provides a separate integration path, currently used mainly for optional original-file uploads.
+Tunes is a native macOS client: SwiftUI/AppKit handle browsing and interaction, while a single app-owned `WKWebView` handles Samply sign-in and authenticated streaming. The complete Library, including shared content, comes from the web session. The official REST API provides a separate integration path for empty-project creation and optional original-file uploads.
 
 The repository uses a feature-oriented single-app architecture. `App`, `Features`, and `Samply` are directory and responsibility boundaries, **not separate Swift modules or frameworks**. They compile into the same Tunes target, and directories do not enforce dependency direction. The current scope does not require additional packages, a generic Repository layer, or another playback engine.
 
@@ -13,10 +13,10 @@ Tunes/
 ├── App/                         App entry point, scenes, and cross-feature coordination
 │   ├── TunesApp.swift           Creates the shared backend; configures windows, Settings, and menus
 │   ├── ContentView.swift        Main interface, navigation, toolbar, upload status, and recovery task
-│   ├── SamplyBackend.swift      Dependency assembly and account, browsing, playback, and upload coordination
+│   ├── SamplyBackend.swift      Dependency assembly and account, browsing, playback, creation, and upload coordination
 │   └── SamplyPageFocus.swift    Exposes the current page to menus through SwiftUI FocusedValues
 ├── Features/
-│   ├── Library/                 Library grid, search, and selection callbacks
+│   ├── Library/                 Library grid, search, selection, project creation, and creation sheet
 │   ├── Album/                   Albums, folders, tracks, versions, and presentation calculations
 │   │   └── Kaset/              Kaset-derived album components
 │   ├── Playback/               PlaybackController, player bar, and interactions
@@ -25,7 +25,7 @@ Tunes/
 │   └── About/                  About window and menu commands
 ├── Samply/
 │   ├── Web/                    WebKit session, bridge health, page targets, and snapshot models
-│   ├── REST/                   Official HTTP API, request/response models, and original-file uploads
+│   ├── REST/                   Official HTTP API, request/response models, project creation, and original-file uploads
 │   ├── Authentication/         Account-bound file TokenStore and email-link conversion
 │   └── SamplyError.swift       Errors shared by both integration paths
 ├── Resources/
@@ -76,7 +76,8 @@ The diagram shows the main calls. Connection views also call `SamplyWebSession` 
 | Owner | State and responsibilities | Update source |
 | --- | --- | --- |
 | `TunesApp` | One app-wide `SamplyBackend` | `@State` shares it across scenes |
-| `SamplyBackend` | Library, selected album/folder, tracks, loading/operation state; assembles web, api, playback, and uploader | Snapshot polling and explicit command results |
+| `SamplyBackend` | Library, selected album/folder, tracks, loading/operation state, creation owner; assembles web, api, playback, uploader, and project creation | Snapshot polling and explicit command results |
+| `ProjectCreationCoordinator` | Single creation request, confirmed result, Library-refresh/navigation stage, and ambiguous-outcome state | REST creation, adapter refresh/browse results, and account invalidation |
 | `SamplyWebSession` | Main WebView, persistent website data store, sign-in window/pop-ups, authentication state, latest snapshot, and bridge health | WebKit navigation and bridge calls |
 | `PlaybackController` | Native playback snapshot, errors, and system media controls | Web playback snapshots and command results |
 | `SamplyUploader` | Single upload task, progress, status, and resulting box ID | Upload-ticket creation, file PUT, and delegate callbacks |
@@ -122,6 +123,35 @@ sequenceDiagram
 `LibraryItem.routeID` prefers a share ID, then a player/project ID. The complete Library cannot be replaced with the REST owned-projects list.
 
 `WebSnapshot.hasLoadedBoxes` in `SamplyWebModels.swift` centralizes album readiness checks. `AlbumContents` only calculates tracks, folders, duration, and presentation text. The `versions` command retrieves versions according to Samply's own access rules. An unloaded empty array must not be presented as a confirmed empty album.
+
+### Empty project creation
+
+The Library toolbar opens a native creation sheet backed by `SamplyBackend.projectCreation`. The coordinator captures the web account and a creation operation before starting, rejects a blank trimmed name, and allows only one POST at a time. The request sends only `name` to the documented `POST /projects` endpoint. Samply's documented server side effect creates a project-scoped player with the account's default player options; Tunes sends no player, sharing, upload, download, version, collaborator, or upload-portal settings and makes no separate player-creation request.
+
+```mermaid
+sequenceDiagram
+    participant V as NewProjectSheet
+    participant B as SamplyBackend / ProjectCreationCoordinator
+    participant A as SamplyAPI
+    participant W as SamplyWebSession
+    participant J as SamplyBridge.js
+    V->>B: create(name)
+    B->>B: Capture account + operation
+    B->>A: POST /projects {name}
+    A-->>B: Project object + playerUrl
+    B->>B: Retain confirmed creation
+    B->>W: call("refreshPage", library)
+    W->>J: Complete authenticated history read
+    J-->>W: WebSnapshot
+    W-->>B: Library including shared projects
+    B->>W: call("browse", routeID)
+    W->>J: Existing /p/<shareid> navigation
+    J-->>W: Loaded album snapshot
+    W-->>B: Open result
+    B-->>V: Opened or retained failure stage
+```
+
+The POST is never automatically retried. Timeouts, connection loss, cancellation, 5xx responses, and malformed success responses are ambiguous: the project may exist. The sheet then explains that possibility and offers a read-only Library refresh before another attempt. A confirmed creation outlives a later refresh or navigation failure; those stages offer Refresh Library or Open Project and never repeat Create. If the complete Library has not yet included the new history entry, the coordinator derives the existing `/p/<shareid>` route from the documented `playerUrl` instead of inventing another route. Sign-out or account changes invalidate stale completions. The WebView is not reloaded, playback is not reset, and the opened project uses the existing album upload flow.
 
 ### Playback and system controls
 
@@ -169,11 +199,11 @@ See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation,
 | Player bar and artwork | `Features/Playback/`, `Features/Album/Kaset/` | `PlayerBarSeekHoldTests`, `AlbumPaletteTests` + manual checks |
 | Web contracts, controls, refresh | `Resources/SamplyBridge.js`, `Samply/Web/` | Node protocol tests, `SamplyBridgeHealthTests`, `PlaybackRecoveryTests` |
 | Email sign-in and authentication state | `Features/Connection/`, `Samply/Authentication/`, `Samply/Web/` | `EmailSignInLinkTests` (in `TunesTests.swift`), `WebAuthenticationStateTests` |
-| REST, PATs, uploads | `Samply/REST/`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift`; temporary-directory storage tests in `FileTokenStoreTests.swift` |
+| REST, PATs, project creation, uploads | `Samply/REST/`, `Features/Library/ProjectCreationCoordinator.swift`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift`, isolated creation tests in `ProjectCreationTests.swift`; temporary-directory storage tests in `FileTokenStoreTests.swift` |
 
 Build and test commands are in the [README](../README.md#verification). Run only `TunesTests` and Node protocol tests. `TunesUITests` is a legacy template containing app-launch code; do not run it. Computer Use, browser automation, UI tests, and screenshots of the running app are prohibited for validation.
 
-The user must manually verify real Samply sign-in, shared content, playback, seeking, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
+The user must manually verify real Samply sign-in, shared content, playback, seeking, project creation, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
 
 ## When to split responsibilities further
 
