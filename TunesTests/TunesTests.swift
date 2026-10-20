@@ -26,6 +26,60 @@ struct TunesTests {
         #expect(projects.first?.timeModified == 1700000000000)
     }
 
+    @Test func createProjectUsesPostBearerAndNameOnlyJSON() async throws {
+        let api = client { request in
+            #expect(request.url?.absoluteString == "https://samply.app/api/v0/projects")
+            #expect(request.httpMethod == "POST")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token")
+            #expect(request.value(forHTTPHeaderField: "Content-Type") == "application/json")
+            #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
+            let json = try #require(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            #expect(Set(json.keys) == ["name"])
+            #expect(json["name"] as? String == "Été – 東京")
+            return (200, [:], #"{"id":"project-new","name":"Été – 東京","object":"project","size":0,"timeCreated":1700000000000,"timeModified":1700000000001,"playerUrl":"https://samply.app/p/share-new"}"#)
+        }
+        let project = try await api.createProject(name: "Été – 東京")
+        #expect(project.id == "project-new")
+        #expect(project.name == "Été – 東京")
+        #expect(project.playerUrl?.absoluteString == "https://samply.app/p/share-new")
+    }
+
+    @Test func createProjectMapsAuthenticationErrorsWithoutServerDetails() async throws {
+        for status in [401, 403] {
+            let api = client { _ in (status, [:], #"{"error":"private server detail"}"#) }
+            do {
+                _ = try await api.createProject(name: "Album")
+                Issue.record("Expected project creation to fail")
+            } catch let error as SamplyError {
+                if status == 401 {
+                    guard case .invalidToken = error else { Issue.record("Wrong auth error"); return }
+                } else {
+                    guard case .http(let code, _) = error, code == 403 else {
+                        Issue.record("Wrong HTTP error"); return
+                    }
+                }
+                #expect(!error.localizedDescription.contains("private server detail"))
+            }
+        }
+    }
+
+    @Test func createProjectRejectsMalformedSuccessResponse() async {
+        let api = client { _ in (200, [:], #"{"playerUrl":"https://samply.app/p/share-new"}"#) }
+        await #expect(throws: (any Error).self) { try await api.createProject(name: "Album") }
+    }
+
+    @Test func createProjectNeverRetriesServerOrRateLimitErrors() async {
+        for status in [429, 500, 503] {
+            let log = RequestCounter()
+            let api = client { _ in
+                _ = log.increment()
+                return (status, ["Retry-After": "0"], "{}")
+            }
+            await #expect(throws: (any Error).self) { try await api.createProject(name: "Album") }
+            #expect(log.count == 1)
+        }
+    }
+
     @Test func boxesDecodeFoldersStacksVersionsAndAudio() async throws {
         let api = client { request in
             #expect(request.url?.path == "/api/v0/projects/project-1/all")
@@ -225,6 +279,22 @@ struct EmailSignInLinkTests {
         #expect(!EmailSignInLinkError.invalidLink.localizedDescription.contains("fixture-code"))
         #expect(!EmailSignInLinkError.invalidLink.localizedDescription.contains("fixture-key"))
     }
+}
+
+private func requestBody(_ request: URLRequest) -> Data {
+    // URLSession may move httpBody to a stream before URLProtocol receives the request.
+    var body = request.httpBody ?? Data()
+    if body.isEmpty, let stream = request.httpBodyStream {
+        stream.open()
+        defer { stream.close() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            body.append(contentsOf: buffer.prefix(count))
+        }
+    }
+    return body
 }
 
 private final class StubURLProtocol: URLProtocol, @unchecked Sendable {

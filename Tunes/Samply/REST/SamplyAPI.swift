@@ -26,6 +26,17 @@ final class SamplyAPI {
         try await request(["projects"], token: token)
     }
 
+    /// Creates an empty owned project through the documented REST API.
+    /// The server also creates a project-scoped player with the account's default
+    /// player options; Tunes never sends those settings or repeats this request.
+    func createProject(name: String) async throws -> SamplyProject {
+        struct Body: Encodable {
+            let name: String
+        }
+        return try await request(["projects"], method: "POST",
+                                 body: JSONEncoder().encode(Body(name: name)))
+    }
+
     func boxes(projectID: String) async throws -> [SamplyBox] {
         try await request(["projects", projectID, "all"])
     }
