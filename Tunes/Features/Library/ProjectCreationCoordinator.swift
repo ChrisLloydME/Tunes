@@ -13,6 +13,12 @@ protocol ProjectCreationWebSession: AnyObject {
     func call<T: Decodable>(_ command: String, arguments: [String: Any]) async throws -> T
 }
 
+@MainActor
+protocol ProjectFileUploading: AnyObject {
+    func performUpload(file: URL, projectID: String, parentID: String?,
+                       progress: @escaping @MainActor @Sendable (Double) -> Void) async throws -> String
+}
+
 /// Owns the one in-flight project creation and the confirmed result that survives
 /// Library refresh or navigation failures. Samply's POST /projects can create a
 /// project even when its response is lost, so this type never retries it and never
@@ -23,6 +29,23 @@ final class ProjectCreationCoordinator {
     struct PlayerRoute: Equatable, Sendable {
         let pathID: String
         let token: String?
+    }
+
+    struct InitialFile: Identifiable, Equatable, Sendable {
+        enum Status: Equatable, Sendable {
+            case pending
+            case uploading
+            case uploaded(boxID: String)
+            case failed(String)
+            case cancelled
+            case uncertain(String)
+        }
+
+        let id = UUID()
+        let url: URL
+        let fileName: String
+        var status: Status = .pending
+        var progress: Double = 0
     }
 
     struct CreatedProject: Equatable, Sendable {
@@ -59,6 +82,25 @@ final class ProjectCreationCoordinator {
         var isBusy: Bool { self == .refreshing || self == .opening }
     }
 
+    enum ArtworkState: Equatable, Sendable {
+        case none
+        case pending
+        case assigned
+        case failed(String)
+        case uncertain(String)
+        case unsupported(String)
+
+        var isBusy: Bool { self == .pending }
+    }
+
+    struct ArtworkResult: Decodable, Sendable {
+        enum Status: String, Decodable, Sendable {
+            case confirmed, submitted, failed, unsupported
+        }
+        let status: Status
+        let message: String?
+    }
+
     enum State: Equatable, Sendable {
         case idle
         case creating
@@ -75,16 +117,24 @@ final class ProjectCreationCoordinator {
     }
 
     private(set) var state: State = .idle
+    private(set) var artworkState: ArtworkState = .none
+    private(set) var initialFiles: [InitialFile] = []
     private(set) var isRefreshingAfterUncertain = false
     @ObservationIgnored private let api: any ProjectCreatingAPI
     @ObservationIgnored private let web: any ProjectCreationWebSession
+    @ObservationIgnored private let fileUploader: any ProjectFileUploading
     @ObservationIgnored private var operation = UUID()
+    @ObservationIgnored private var artworkTask: Task<Void, Never>?
+    @ObservationIgnored private var artworkPayload: ProjectArtworkPayload?
+    @ObservationIgnored private var initialUploadTask: Task<Void, Never>?
     @ObservationIgnored var onLibraryRefreshed: (([LibraryItem]) -> Void)?
     @ObservationIgnored var onProjectOpened: ((LibraryItem, WebSnapshot) -> Void)?
 
-    init(api: any ProjectCreatingAPI, web: any ProjectCreationWebSession) {
+    init(api: any ProjectCreatingAPI, web: any ProjectCreationWebSession,
+         fileUploader: any ProjectFileUploading) {
         self.api = api
         self.web = web
+        self.fileUploader = fileUploader
     }
 
     var isCreating: Bool {
@@ -93,7 +143,55 @@ final class ProjectCreationCoordinator {
     }
 
     var blocksDismissal: Bool {
-        isCreating || createdStage?.isBusy == true || isRefreshingAfterUncertain
+        isCreating || createdStage?.isBusy == true || artworkState.isBusy ||
+            isUploadingInitialFiles || isRefreshingAfterUncertain
+    }
+
+    var isUploadingInitialFiles: Bool {
+        initialUploadTask != nil || initialFiles.contains {
+            $0.status == .pending || $0.status == .uploading
+        }
+    }
+
+    var hasOptionalCreatedWork: Bool {
+        artworkState != .none || !initialFiles.isEmpty
+    }
+
+    var canRetryInitialFiles: Bool {
+        createdProject != nil && !isUploadingInitialFiles && initialFiles.contains {
+            switch $0.status {
+            case .failed, .cancelled: return true
+            default: return false
+            }
+        }
+    }
+
+    var hasUncertainInitialFiles: Bool {
+        initialFiles.contains {
+            if case .uncertain = $0.status { return true }
+            return false
+        }
+    }
+
+    var canFinishCreatedProject: Bool {
+        guard case .created(_, .opened) = state,
+              !isUploadingInitialFiles, !artworkState.isBusy else { return false }
+        if case .uncertain = artworkState { return false }
+        if case .failed = artworkState { return false }
+        return !initialFiles.contains {
+            switch $0.status {
+            case .failed, .uncertain, .cancelled: return true
+            default: return false
+            }
+        }
+    }
+
+    var canRetryArtwork: Bool {
+        guard artworkPayload != nil else { return false }
+        switch artworkState {
+        case .failed, .uncertain: return true
+        default: return false
+        }
     }
 
     var createdProject: CreatedProject? {
@@ -110,7 +208,8 @@ final class ProjectCreationCoordinator {
 
     /// Starts exactly one POST /projects request. A blank name after trimming is
     /// rejected before any account or network work.
-    func create(name: String) async {
+    func create(name: String, artwork: ProjectArtworkPayload? = nil,
+                files: [URL] = []) async {
         guard !isCreating else { return }
         if case .created = state { return }
         if case .uncertain = state { return }
@@ -125,6 +224,13 @@ final class ProjectCreationCoordinator {
             return
         }
         guard !Task.isCancelled else { return }
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkPayload = nil
+        artworkState = .none
+        initialUploadTask?.cancel()
+        initialUploadTask = nil
+        initialFiles = []
 
         let ticket = UUID()
         operation = ticket
@@ -138,6 +244,22 @@ final class ProjectCreationCoordinator {
                                          playerURL: project.playerUrl,
                                          playerRoute: Self.playerRoute(from: project.playerUrl))
             state = .created(created, .refreshing)
+            artworkPayload = artwork
+            artworkState = artwork == nil ? .none : .pending
+            initialFiles = files.map {
+                InitialFile(url: $0, fileName: $0.lastPathComponent)
+            }
+            if let artwork {
+                artworkTask = Task { [weak self] in
+                    await self?.assignArtwork(artwork, accountID: accountID)
+                }
+            }
+            if !initialFiles.isEmpty {
+                initialUploadTask = Task { [weak self] in
+                    await self?.uploadPendingFiles(projectID: created.project.id,
+                                                   accountID: accountID)
+                }
+            }
             await refreshAndOpen(created, ticket: ticket)
         } catch {
             guard isCurrent(ticket, accountID: accountID) else { return }
@@ -240,6 +362,148 @@ final class ProjectCreationCoordinator {
         state = .idle
     }
 
+    func cancelInitialUploads() {
+        guard isUploadingInitialFiles else { return }
+        initialUploadTask?.cancel()
+        markRemainingInitialFilesCancelled()
+    }
+
+    func retryFailedInitialFiles() {
+        guard canRetryInitialFiles, let created = createdProject,
+              isCurrentAccount(created.accountID) else { return }
+        var retried = false
+        for index in initialFiles.indices {
+            switch initialFiles[index].status {
+            case .failed, .cancelled:
+                initialFiles[index].status = .pending
+                initialFiles[index].progress = 0
+                retried = true
+            default:
+                break
+            }
+        }
+        guard retried else { return }
+        initialUploadTask = Task { [weak self] in
+            await self?.uploadPendingFiles(projectID: created.project.id,
+                                           accountID: created.accountID)
+        }
+    }
+
+    private func uploadPendingFiles(projectID: String, accountID: String) async {
+        defer { initialUploadTask = nil }
+        while !Task.isCancelled,
+              let index = initialFiles.firstIndex(where: { $0.status == .pending }) {
+            guard isCurrentAccount(accountID),
+                  createdProject?.project.id == projectID else { return }
+            let file = initialFiles[index]
+            initialFiles[index].status = .uploading
+            initialFiles[index].progress = 0
+            do {
+                let boxID = try await fileUploader.performUpload(
+                    file: file.url, projectID: projectID, parentID: nil
+                ) { [weak self] value in
+                    self?.updateInitialFileProgress(id: file.id, value: value)
+                }
+                guard isCurrentAccount(accountID),
+                      createdProject?.project.id == projectID,
+                      let updatedIndex = initialFiles.firstIndex(where: { $0.id == file.id }),
+                      initialFiles[updatedIndex].status == .uploading else { return }
+                initialFiles[updatedIndex].status = .uploaded(boxID: boxID)
+                initialFiles[updatedIndex].progress = 1
+            } catch is CancellationError {
+                guard isCurrentAccount(accountID),
+                      createdProject?.project.id == projectID else { return }
+                markRemainingInitialFilesCancelled()
+                return
+            } catch {
+                guard isCurrentAccount(accountID),
+                      createdProject?.project.id == projectID,
+                      let updatedIndex = initialFiles.firstIndex(where: { $0.id == file.id }),
+                      initialFiles[updatedIndex].status == .uploading else { return }
+                if Self.isAmbiguous(error) {
+                    initialFiles[updatedIndex].status = .uncertain(
+                        "Samply did not confirm whether this file was uploaded. The file may already exist in the project."
+                    )
+                } else {
+                    initialFiles[updatedIndex].status = .failed(error.localizedDescription)
+                }
+                initialFiles[updatedIndex].progress = 0
+            }
+        }
+        if Task.isCancelled {
+            markRemainingInitialFilesCancelled()
+        }
+    }
+
+    private func updateInitialFileProgress(id: UUID, value: Double) {
+        guard let index = initialFiles.firstIndex(where: { $0.id == id }),
+              initialFiles[index].status == .uploading else { return }
+        initialFiles[index].progress = min(max(value, 0), 1)
+    }
+
+    private func markRemainingInitialFilesCancelled() {
+        for index in initialFiles.indices {
+            switch initialFiles[index].status {
+            case .pending, .uploading:
+                initialFiles[index].status = .cancelled
+                initialFiles[index].progress = 0
+            default:
+                break
+            }
+        }
+    }
+
+    func retryArtwork() {
+        guard canRetryArtwork, let payload = artworkPayload,
+              let created = createdProject, isCurrentAccount(created.accountID) else { return }
+        artworkState = .pending
+        artworkTask = Task { [weak self] in
+            await self?.assignArtwork(payload, accountID: created.accountID)
+        }
+    }
+
+    private func assignArtwork(_ payload: ProjectArtworkPayload, accountID: String) async {
+        defer { artworkTask = nil }
+        guard let project = createdProject, isCurrentAccount(accountID) else { return }
+        do {
+            let result: ArtworkResult = try await web.call("setProjectArtwork", arguments: [
+                "projectID": project.project.id,
+                "fileName": payload.fileName,
+                "mimeType": payload.mimeType,
+                "dataBase64": payload.data.base64EncodedString()
+            ])
+            guard isCurrentAccount(accountID),
+                  createdProject?.project.id == project.project.id else { return }
+            switch result.status {
+            case .confirmed:
+                artworkState = .assigned
+                artworkPayload = nil
+            case .submitted:
+                artworkState = .uncertain(result.message ?? Self.artworkUncertainMessage)
+            case .failed:
+                artworkState = .failed(result.message ?? Self.artworkFailureMessage)
+            case .unsupported:
+                artworkState = .unsupported(result.message ?? Self.artworkUnsupportedMessage)
+                artworkPayload = nil
+            }
+        } catch is CancellationError {
+            guard isCurrentAccount(accountID),
+                  createdProject?.project.id == project.project.id else { return }
+            artworkState = .uncertain(Self.artworkUncertainMessage)
+        } catch {
+            guard isCurrentAccount(accountID),
+                  createdProject?.project.id == project.project.id else { return }
+            if Self.isAmbiguous(error) {
+                artworkState = .uncertain(Self.artworkUncertainMessage)
+            } else if let bridge = error as? SamplyBridgeError,
+                      case .executionFailed = bridge {
+                artworkState = .uncertain(Self.artworkUncertainMessage)
+            } else {
+                artworkState = .failed(error.localizedDescription)
+            }
+        }
+    }
+
     /// Clears a failed or completed sheet. A confirmed creation that still needs
     /// a Library refresh or navigation is retained so it cannot become a duplicate.
     func reset() {
@@ -254,6 +518,13 @@ final class ProjectCreationCoordinator {
     /// Invalidates every in-flight result after sign-out or an account change.
     func invalidate() {
         operation = UUID()
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkPayload = nil
+        artworkState = .none
+        initialUploadTask?.cancel()
+        initialUploadTask = nil
+        initialFiles = []
         isRefreshingAfterUncertain = false
         state = .idle
     }
@@ -337,13 +608,16 @@ final class ProjectCreationCoordinator {
     private func openDestination(for created: CreatedProject) -> OpenDestination? {
         let projectID = created.project.id
         let baseItem = created.libraryItem ?? created.openItem
+        if let playerRoute = created.playerRoute, let baseItem {
+            // The documented player URL is the authoritative link for a newly
+            // created project. Its path can carry a project/player identity even
+            // when the refreshed Library entry has not received its share ID yet.
+            return OpenDestination(routeID: playerRoute.pathID, token: playerRoute.token,
+                                   item: baseItem, projectID: projectID)
+        }
         if let shareID = created.libraryItem?.shareID, !shareID.isEmpty,
            let baseItem {
             return OpenDestination(routeID: shareID, token: nil,
-                                   item: baseItem, projectID: projectID)
-        }
-        if let playerRoute = created.playerRoute, let baseItem {
-            return OpenDestination(routeID: playerRoute.pathID, token: playerRoute.token,
                                    item: baseItem, projectID: projectID)
         }
         guard let baseItem, !baseItem.routeID.isEmpty else { return nil }
@@ -457,6 +731,12 @@ final class ProjectCreationCoordinator {
         return false
     }
 
+    private static let artworkUncertainMessage =
+        "Samply accepted the artwork upload, but did not confirm the project artwork update. The artwork may already be assigned; check the project before trying again."
+    private static let artworkFailureMessage =
+        "Samply could not assign the project artwork."
+    private static let artworkUnsupportedMessage =
+        "Samply's current web build does not expose the authorized project artwork contract. The project was created without artwork."
     private static let interruptedRefreshMessage =
         "Project created, but the Library refresh was interrupted. Refresh Library to try again."
     private static let interruptedOpenMessage =
@@ -505,6 +785,8 @@ final class ProjectCreationCoordinator {
 }
 
 extension SamplyAPI: ProjectCreatingAPI {}
+
+extension SamplyUploader: ProjectFileUploading {}
 
 extension SamplyWebSession: ProjectCreationWebSession {
     var accountID: String? { snapshot?.account?.uid }

@@ -40,7 +40,7 @@ final class SamplyBackend {
         self.api = api
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
-        projectCreation = ProjectCreationCoordinator(api: api, web: web)
+        projectCreation = ProjectCreationCoordinator(api: api, web: web, fileUploader: uploader)
         do { hasToken = try tokens.read() != nil }
         catch { recordFailure(error) }
         projectCreation.onLibraryRefreshed = { [weak self] items in

@@ -35,55 +35,75 @@ final class SamplyUploader {
         uploadedBoxID = nil
         task = Task { [weak self] in
             guard let self else { return }
-            let scoped = file.startAccessingSecurityScopedResource()
-            defer { if scoped { file.stopAccessingSecurityScopedResource() } }
             do {
-                let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
-                guard attributes[.type] as? FileAttributeType == .typeRegular,
-                      let size = (attributes[.size] as? NSNumber)?.int64Value, size > 0 else {
-                    throw SamplyError.fileChanged
+                guard !Task.isCancelled, self.operationID == id else { return }
+                // The ticket request is part of preparing the upload, but the
+                // visible progress lane starts once the streamed PUT can report.
+                self.status = .uploading
+                let boxID = try await self.performUpload(file: file, projectID: projectID,
+                                                         parentID: parentID) { [weak self] value in
+                    guard let self, self.operationID == id, self.status == .uploading else { return }
+                    self.progress = max(self.progress, min(max(value, 0), 1))
                 }
-                let mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
-                let ticket = try await api.uploadTicket(projectID: projectID, name: file.lastPathComponent,
-                                                        mimeType: mime, size: size, parentID: parentID)
                 try Task.checkCancellation()
-                guard operationID == id else { return }
-                let updated = try FileManager.default.attributesOfItem(atPath: file.path)
-                guard (updated[.size] as? NSNumber)?.int64Value == size,
-                      updated[.modificationDate] as? Date == attributes[.modificationDate] as? Date else {
-                    throw SamplyError.fileChanged
-                }
-                let request = try Self.storageRequest(ticket: ticket)
-                status = .uploading
-                let delegate = UploadDelegate { [weak self] sent, total in
-                    guard let self, self.operationID == id, self.status == .uploading, total > 0 else { return }
-                    self.progress = min(max(Double(sent) / Double(total), self.progress), 1)
-                }
-                let config = storageConfiguration ?? URLSessionConfiguration.ephemeral
-                config.httpShouldSetCookies = false
-                config.timeoutIntervalForRequest = 120
-                config.timeoutIntervalForResource = 24 * 60 * 60
-                // Separate storage session: no Authorization header or account cookies.
-                let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
-                defer { session.finishTasksAndInvalidate() }
-                let (_, response) = try await session.upload(for: request, fromFile: file)
-                try Task.checkCancellation()
-                guard operationID == id else { return }
-                guard let response = response as? HTTPURLResponse else { throw SamplyError.invalidResponse }
-                guard (200..<300).contains(response.statusCode) else {
-                    throw SamplyError.http(response.statusCode, retryAfter: nil)
-                }
-                progress = 1
-                uploadedBoxID = ticket.boxid
-                status = .completed
+                guard self.operationID == id else { return }
+                self.progress = 1
+                self.uploadedBoxID = boxID
+                self.status = .completed
             } catch is CancellationError {
-                if operationID == id { status = .cancelled }
+                if self.operationID == id { self.status = .cancelled }
             } catch {
-                guard operationID == id else { return }
-                if Task.isCancelled { status = .cancelled }
-                else { status = .failed(error.localizedDescription) }
+                guard self.operationID == id else { return }
+                if Task.isCancelled { self.status = .cancelled }
+                else { self.status = .failed(error.localizedDescription) }
             }
         }
+    }
+
+    /// Awaitable upload used by explicit queues. It shares the same ticket,
+    /// streamed PUT, file checks, and storage-session isolation as the album flow
+    /// without changing the single visible upload status.
+    func performUpload(file: URL, projectID: String, parentID: String? = nil,
+                       progress: @escaping @MainActor @Sendable (Double) -> Void) async throws -> String {
+        try Task.checkCancellation()
+        let scoped = file.startAccessingSecurityScopedResource()
+        defer { if scoped { file.stopAccessingSecurityScopedResource() } }
+        let attributes = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = (attributes[.size] as? NSNumber)?.int64Value, size > 0 else {
+            throw SamplyError.fileChanged
+        }
+        let mime = UTType(filenameExtension: file.pathExtension)?.preferredMIMEType ?? "application/octet-stream"
+        try Task.checkCancellation()
+        let ticket = try await api.uploadTicket(projectID: projectID, name: file.lastPathComponent,
+                                                mimeType: mime, size: size, parentID: parentID)
+        try Task.checkCancellation()
+        let updated = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard (updated[.size] as? NSNumber)?.int64Value == size,
+              updated[.modificationDate] as? Date == attributes[.modificationDate] as? Date else {
+            throw SamplyError.fileChanged
+        }
+        let request = try Self.storageRequest(ticket: ticket)
+        progress(0)
+        let delegate = UploadDelegate { sent, total in
+            guard total > 0 else { return }
+            progress(min(max(Double(sent) / Double(total), 0), 1))
+        }
+        let config = storageConfiguration?.copy() as? URLSessionConfiguration
+            ?? URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.timeoutIntervalForRequest = 120
+        config.timeoutIntervalForResource = 24 * 60 * 60
+        // Separate storage session: no Authorization header or account cookies.
+        let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (_, response) = try await session.upload(for: request, fromFile: file)
+        try Task.checkCancellation()
+        guard let response = response as? HTTPURLResponse else { throw SamplyError.invalidResponse }
+        guard (200..<300).contains(response.statusCode) else {
+            throw SamplyError.http(response.statusCode, retryAfter: nil)
+        }
+        return ticket.boxid
     }
 
     func cancel() {

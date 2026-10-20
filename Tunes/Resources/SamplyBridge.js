@@ -242,6 +242,117 @@
         }
         return snapshot();
     }
+    const artworkSignature = value => JSON.stringify(value ?? null);
+    function base64Bytes(value) {
+        if (typeof value !== 'string' || !value.length) return null;
+        try {
+            const binary = atob(value);
+            if (binary.length > 6 * 1024 * 1024) return null;
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+            return bytes;
+        } catch {
+            return null;
+        }
+    }
+    async function setProjectArtwork(args) {
+        assertAccount();
+        const uid = account().uid;
+        const projectID = text(args.projectID);
+        if (!projectID) return {status: 'failed', message: 'Missing project identity.'};
+        if (text(args.mimeType)?.startsWith('image/') !== true)
+            return {status: 'failed', message: 'The selected artwork is not a supported image.'};
+        const fileName = text(args.fileName);
+        if (!fileName || fileName.length > 200)
+            return {status: 'failed', message: 'The selected artwork has an invalid file name.'};
+        const bytes = base64Bytes(args.dataBase64);
+        if (!bytes) return {status: 'failed', message: 'The selected artwork could not be read.'};
+
+        const api = await dataAPI();
+        if (typeof api.dW !== 'function' || typeof api.aJ !== 'function')
+            return {status: 'unsupported', message: 'This Samply web build does not expose the authorized project artwork contract.'};
+        const uploads = store('upload');
+        if (!uploads || typeof uploads.uploadFileItems !== 'function')
+            return {status: 'unsupported', message: 'This Samply web build does not expose the authorized project artwork uploader.'};
+
+        const db = api.a9(), docRef = api.aJ(db, api.a7.PROJECTS, projectID);
+        let before;
+        try {
+            const snapshot = await withDeadline(api.dW(docRef));
+            if (!snapshot.exists()) return {status: 'failed', message: 'The created project could not be found in Samply.'};
+            before = snapshot.data();
+        } catch {
+            return {status: 'failed', message: 'Tunes could not verify the project before assigning artwork.'};
+        }
+        const role = before?.roles?.[uid]?.role;
+        if (before?.owner !== uid && !['admin', 'editor'].includes(role))
+            return {status: 'failed', message: 'This account cannot change the project artwork.'};
+        const beforeArtwork = artworkSignature(before.artwork);
+
+        let file;
+        try { file = new File([bytes], fileName, {type: args.mimeType}); }
+        catch { return {status: 'failed', message: 'The selected artwork could not be prepared for Samply.'}; }
+        if (file.type !== args.mimeType || file.size !== bytes.length)
+            return {status: 'failed', message: 'The selected artwork could not be prepared for Samply.'};
+
+        let resolveUpload, rejectUpload;
+        const uploadFinished = new Promise((resolve, reject) => {
+            resolveUpload = resolve;
+            rejectUpload = reject;
+        });
+        let boxIDs;
+        try {
+            // Same authorized artwork path as Samply's project settings: a
+            // hidden system upload with writeback:"project". This is not an
+            // ordinary visible project file and no REST artwork field is invented.
+            boxIDs = await uploads.uploadFileItems({
+                fileItems: [{file}], projectid: projectID,
+                writeback: 'project', isHidden: false, isSystem: true,
+                uploadTaskCallbacks: {
+                    onComplete: () => resolveUpload(),
+                    onError: () => rejectUpload(new Error('artwork upload failed'))
+                }
+            });
+        } catch {
+            return {status: 'submitted',
+                message: 'Samply did not confirm the artwork upload. The artwork may already be assigned.'};
+        }
+        if (!Array.isArray(boxIDs) || !boxIDs.length)
+            return {status: 'submitted',
+                message: 'Samply did not return an uploaded artwork identity.'};
+
+        let uploadTimer;
+        try {
+            await Promise.race([uploadFinished, new Promise((_, reject) => {
+                uploadTimer = setTimeout(() => reject(new Error('artwork upload timed out')), 60000);
+            })]);
+        } catch {
+            return {status: 'submitted',
+                message: 'Samply did not confirm the artwork upload before the deadline.'};
+        } finally {
+            clearTimeout(uploadTimer);
+        }
+        if (account()?.uid !== uid)
+            throw operationError('The Samply account changed while artwork was uploading.');
+
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+            if (account()?.uid !== uid)
+                throw operationError('The Samply account changed while artwork was uploading.');
+            try {
+                const current = await api.dW(docRef);
+                if (current.exists() && artworkSignature(current.data().artwork) !== beforeArtwork) {
+                    return {status: 'confirmed'};
+                }
+            } catch {
+                // The upload is already submitted; keep polling the authorized
+                // project document until the deadline without exposing details.
+            }
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        return {status: 'submitted',
+            message: 'Samply accepted the artwork upload, but the project artwork has not updated yet. Check the project before trying again.'};
+    }
     async function playBox(args) {
         assertAccount();
         const ticket = ++operation;
@@ -287,6 +398,7 @@
             return true;
         }
         if (name === 'browse') return await browse(args);
+        if (name === 'setProjectArtwork') return await setProjectArtwork(args);
         if (name === 'playBox') return await playBox(args);
         if (name === 'versions') {
             const b = requireStore('boxes', ['getBoxVersions']);
