@@ -39,7 +39,12 @@ enum ProjectArtworkProcessor {
     static func selection(fromFile fileURL: URL) throws -> ProjectArtworkSelection {
         let scoped = fileURL.startAccessingSecurityScopedResource()
         defer { if scoped { fileURL.stopAccessingSecurityScopedResource() } }
-        let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey])
+        let values: URLResourceValues
+        do {
+            values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey])
+        } catch {
+            throw ProjectArtworkError.unreadable
+        }
         guard values.isRegularFile == true,
               let size = values.fileSize, size > 0 else {
             throw ProjectArtworkError.unreadable

@@ -155,6 +155,9 @@ final class SamplyBackend {
                                         expectedProjectID: item.projectID) {
                     boxes = state.boxes
                     albumLoadState = .loaded
+                } else {
+                    albumLoadState = .failed
+                    recordFailure(SamplyError.invalidResponse)
                 }
                 isBrowsing = false
             } catch {

@@ -498,6 +498,13 @@ final class ProjectCreationCoordinator {
             } else if let bridge = error as? SamplyBridgeError,
                       case .executionFailed = bridge {
                 artworkState = .uncertain(Self.artworkUncertainMessage)
+            } else if let bridge = error as? SamplyBridgeError,
+                      case .operationFailed = bridge {
+                artworkState = .unsupported(Self.artworkUnsupportedMessage)
+                artworkPayload = nil
+            } else if error is DecodingError {
+                artworkState = .unsupported(Self.artworkUnsupportedMessage)
+                artworkPayload = nil
             } else {
                 artworkState = .failed(error.localizedDescription)
             }
@@ -612,6 +619,13 @@ final class ProjectCreationCoordinator {
             // The documented player URL is the authoritative link for a newly
             // created project. Its path can carry a project/player identity even
             // when the refreshed Library entry has not received its share ID yet.
+            // If the URL has no share token, a refreshed Library share ID is the
+            // safer existing route.
+            if playerRoute.token == nil,
+               let shareID = created.libraryItem?.shareID, !shareID.isEmpty {
+                return OpenDestination(routeID: shareID, token: nil,
+                                       item: baseItem, projectID: projectID)
+            }
             return OpenDestination(routeID: playerRoute.pathID, token: playerRoute.token,
                                    item: baseItem, projectID: projectID)
         }

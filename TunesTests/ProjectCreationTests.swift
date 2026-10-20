@@ -297,6 +297,47 @@ struct ProjectCreationTests {
         #expect(!coordinator.canRetryArtwork)
     }
 
+    @Test func submittedArtworkIsNotAutomaticallyResubmitted() async {
+        let web = StubCreationWeb(libraryResponses: [.success(snapshot())])
+        web.artworkResponses = [.success(.init(
+            status: .submitted,
+            message: "Samply accepted the artwork upload, but did not confirm the update."
+        ))]
+        let api = StubProjectAPI(result: .success(project()))
+        let coordinator = ProjectCreationCoordinator(api: api, web: web,
+                                                     fileUploader: StubFileUploader())
+
+        await coordinator.create(name: "Album", artwork: artworkPayload())
+        await waitUntil {
+            if case .uncertain = coordinator.artworkState { return true }
+            return false
+        }
+        #expect(web.calls.filter { $0.command == "setProjectArtwork" }.count == 1)
+        #expect(coordinator.canRetryArtwork)
+
+        await Task.yield()
+        #expect(web.calls.filter { $0.command == "setProjectArtwork" }.count == 1)
+        #expect(api.names.count == 1)
+    }
+
+    @Test func changedArtworkContractIsReportedAsUnsupported() async {
+        let web = StubCreationWeb(libraryResponses: [.success(snapshot())])
+        web.artworkResponses = [.failure(SamplyBridgeError.operationFailed)]
+        let api = StubProjectAPI(result: .success(project()))
+        let coordinator = ProjectCreationCoordinator(api: api, web: web,
+                                                     fileUploader: StubFileUploader())
+
+        await coordinator.create(name: "Album", artwork: artworkPayload())
+        await waitUntil {
+            if case .unsupported = coordinator.artworkState { return true }
+            return false
+        }
+
+        #expect(api.names.count == 1)
+        #expect(!coordinator.canRetryArtwork)
+        #expect(coordinator.createdProject?.project.id == "project-1")
+    }
+
     @Test func initialUploadsStartBeforeNavigationAndSurviveItsFailure() async throws {
         let file = try temporaryFile("Initial Mix.wav")
         defer { try? FileManager.default.removeItem(at: file) }

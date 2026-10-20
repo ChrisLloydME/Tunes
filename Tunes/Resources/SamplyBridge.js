@@ -303,7 +303,7 @@
         let boxIDs;
         try {
             // Same authorized artwork path as Samply's project settings: a
-            // hidden system upload with writeback:"project". This is not an
+            // system upload filtered from visible project files with writeback:"project". This is not an
             // ordinary visible project file and no REST artwork field is invented.
             boxIDs = await uploads.uploadFileItems({
                 fileItems: [{file}], projectid: projectID,
