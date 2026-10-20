@@ -41,11 +41,15 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
     const router = {currentRoute: {value: {params: {shareid: 'share-1'}}},
         async push(route) {
             calls.push(['navigate', route]);
-            const shareid = decodeURIComponent(route.path.split('/').pop());
-            this.currentRoute.value.path = route.path;
+            // The player view resolves a token-bearing external link to the live
+            // share route and removes the token from the URL.
+            const token = route.query?.token;
+            const shareid = token ? 'share-1' : decodeURIComponent(route.path.split('/').pop());
+            const {token: _discarded, ...query} = route.query ?? {};
+            this.currentRoute.value.path = token ? `/p/${shareid}` : route.path;
             this.currentRoute.value.params.shareid = shareid;
-            this.currentRoute.value.query = route.query;
-            player.shareid = shareid; boxes.currentLevelId = route.query?.group;
+            this.currentRoute.value.query = query;
+            player.shareid = shareid; boxes.currentLevelId = query.group;
         }};
     const server = {library: [], boxes: []};
     const dataAPI = {
@@ -324,6 +328,29 @@ test('does not publish stale boxes during a player route transition', async () =
     const f = fixture(); f.player.shareid = 'previous-share';
     const snapshot = await f.bridge.command('snapshot');
     assert.equal(snapshot.boxesReady, false); assert.equal(snapshot.boxes.length, 0);
+});
+
+test('opens an empty project through a tokenized player URL with matching project identity', async () => {
+    const f = fixture();
+    f.boxes.boxViewModelsCurrentLevel = [];
+    const snapshot = await f.bridge.command('browse', {
+        routeID: 'project-1', token: 'share-1', projectID: 'project-1'
+    });
+    assert.equal(snapshot.boxesReady, true);
+    assert.deepEqual(plain(snapshot.boxes), []);
+    assert.equal(snapshot.projectID, 'project-1');
+    assert.equal(snapshot.routeID, 'share-1');
+    assert.deepEqual(plain(f.calls), [['navigate', {
+        path: '/p/project-1', query: {token: 'share-1'}
+    }]]);
+});
+
+test('rejects a loaded player whose project identity differs from the requested project', async () => {
+    const f = fixture();
+    f.player.parentProjectID = 'project-other';
+    await assert.rejects(f.bridge.command('browse', {
+        routeID: 'project-1', token: 'share-1', projectID: 'project-1'
+    }), /did not match/);
 });
 
 test('does not report unloaded view models or the previous folder as an empty album', async () => {

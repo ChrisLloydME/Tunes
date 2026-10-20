@@ -48,7 +48,7 @@ struct ProjectCreationTests {
         let item = libraryItem()
         let web = StubCreationWeb(
             libraryResponses: [.success(snapshot(library: [item]))],
-            browseResponse: { routeID in
+            browseResponse: { routeID, _ in
                 #expect(routeID == "share-1")
                 return snapshot(routeID: routeID)
             }
@@ -77,7 +77,7 @@ struct ProjectCreationTests {
         let playerURL = URL(string: "https://samply.app/p/share-from-url")!
         let web = StubCreationWeb(
             libraryResponses: [.success(snapshot())],
-            browseResponse: { routeID in
+            browseResponse: { routeID, _ in
                 #expect(routeID == "share-from-url")
                 return snapshot(routeID: routeID)
             }
@@ -105,7 +105,7 @@ struct ProjectCreationTests {
                 .failure(URLError(.cannotConnectToHost)),
                 .success(snapshot(library: [item]))
             ],
-            browseResponse: { routeID in snapshot(routeID: routeID) }
+            browseResponse: { routeID, _ in snapshot(routeID: routeID) }
         )
         let api = StubProjectAPI(result: .success(project()))
         let coordinator = ProjectCreationCoordinator(api: api, web: web)
@@ -197,6 +197,40 @@ struct ProjectCreationTests {
         #expect(api.names.count == 1)
     }
 
+    @Test func matchingRouteWithDifferentProjectIdentityIsNotLoaded() {
+        let item = libraryItem()
+        let otherProject = snapshot(routeID: "share-1", projectID: "project-other")
+        #expect(!otherProject.hasLoadedBoxes(for: item, groupID: nil))
+        #expect(otherProject.hasLoadedBoxes(for: item, groupID: nil,
+                                            expectedProjectID: "project-other"))
+    }
+
+    @Test func playerURLTokenIsResolvedToTheLiveShareRoute() async {
+        let playerURL = URL(string: "https://samply.app/p/project-1?token=share-token&si=user-a")!
+        let web = StubCreationWeb(
+            libraryResponses: [.success(snapshot())],
+            browseResponse: { routeID, arguments in
+                #expect(routeID == "project-1")
+                #expect(arguments["token"] as? String == "share-token")
+                #expect(arguments["projectID"] as? String == "project-1")
+                return self.snapshot(routeID: "resolved-share", projectID: "project-1")
+            }
+        )
+        let api = StubProjectAPI(result: .success(project(playerURL: playerURL)))
+        let coordinator = ProjectCreationCoordinator(api: api, web: web)
+        var opened: LibraryItem?
+        coordinator.onProjectOpened = { item, _ in opened = item }
+
+        await coordinator.create(name: "Album")
+        #expect(coordinator.createdStage == .delayed)
+        #expect(coordinator.createdProject?.openItem?.shareID == nil)
+
+        await coordinator.openCreatedProject()
+        #expect(coordinator.createdStage == .opened)
+        #expect(opened?.shareID == "resolved-share")
+        #expect(opened?.projectID == "project-1")
+    }
+
     @Test func playerURLRouteMustUseTheExistingSamplyPath() {
         #expect(ProjectCreationCoordinator.routeID(
             from: URL(string: "https://samply.app/p/share-new")!) == "share-new")
@@ -218,7 +252,8 @@ struct ProjectCreationTests {
     }
 
     private func snapshot(account: String = "account-a", library: [LibraryItem] = [],
-                          routeID: String? = nil) -> WebSnapshot {
+                          routeID: String? = nil,
+                          projectID: String? = "project-1") -> WebSnapshot {
         WebSnapshot(
             version: 1,
             account: .init(uid: account, name: nil, avatarURL: nil),
@@ -226,7 +261,7 @@ struct ProjectCreationTests {
             libraryReady: true,
             library: library,
             routeID: routeID,
-            projectID: nil,
+            projectID: projectID,
             levelID: nil,
             boxesReady: routeID != nil,
             boxes: [],
@@ -288,11 +323,11 @@ private final class StubCreationWeb: ProjectCreationWebSession {
     var accountID: String? = "account-a"
     var isSigningOut = false
     var libraryResponses: [Result<WebSnapshot, any Error>]
-    var browseResponse: (String) throws -> WebSnapshot
+    var browseResponse: (String, [String: Any]) throws -> WebSnapshot
     private(set) var calls: [(command: String, arguments: [String: Any])] = []
 
     init(libraryResponses: [Result<WebSnapshot, any Error>] = [],
-         browseResponse: @escaping (String) throws -> WebSnapshot = { _ in
+         browseResponse: @escaping (String, [String: Any]) throws -> WebSnapshot = { _, _ in
              throw SamplyError.invalidResponse
          }) {
         self.libraryResponses = libraryResponses
@@ -307,7 +342,7 @@ private final class StubCreationWeb: ProjectCreationWebSession {
             guard !libraryResponses.isEmpty else { throw SamplyError.invalidResponse }
             value = try libraryResponses.removeFirst().get()
         case "browse":
-            value = try browseResponse(arguments["routeID"] as? String ?? "")
+            value = try browseResponse(arguments["routeID"] as? String ?? "", arguments)
         default:
             throw SamplyError.invalidResponse
         }

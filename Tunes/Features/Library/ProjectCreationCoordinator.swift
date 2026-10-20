@@ -20,22 +20,31 @@ protocol ProjectCreationWebSession: AnyObject {
 @MainActor
 @Observable
 final class ProjectCreationCoordinator {
+    struct PlayerRoute: Equatable, Sendable {
+        let pathID: String
+        let token: String?
+    }
+
     struct CreatedProject: Equatable, Sendable {
         let accountID: String
         let project: SamplyProject
         let playerURL: URL?
-        let routeID: String?
+        let playerRoute: PlayerRoute?
         var libraryItem: LibraryItem?
+
+        var routeID: String? { playerRoute?.pathID }
 
         var openItem: LibraryItem? {
             if let libraryItem { return libraryItem }
-            // The documented player URL uses the existing /p/<shareid> route.
-            // Its derived identity lets the user open a project before the
-            // complete web Library has propagated the new history entry.
+            // A documented player URL can carry a share token separately from
+            // its path identity. Do not invent a share ID from that path; the
+            // adapter resolves the token and reports the live share route.
             guard let routeID else { return nil }
             return LibraryItem(id: project.id, name: project.name, projectID: project.id,
-                               playerID: nil, shareID: routeID, artist: nil,
-                               artwork: project.artwork, canUpload: true, isOwned: true)
+                               playerID: nil,
+                               shareID: playerRoute?.token == nil ? routeID : nil,
+                               artist: nil, artwork: project.artwork,
+                               canUpload: true, isOwned: true)
         }
     }
 
@@ -56,6 +65,13 @@ final class ProjectCreationCoordinator {
         case created(CreatedProject, Stage)
         case failed(String)
         case uncertain(String, canStartOver: Bool)
+    }
+
+    private struct OpenDestination {
+        let routeID: String
+        let token: String?
+        let item: LibraryItem
+        let projectID: String
     }
 
     private(set) var state: State = .idle
@@ -120,7 +136,7 @@ final class ProjectCreationCoordinator {
 
             let created = CreatedProject(accountID: accountID, project: project,
                                          playerURL: project.playerUrl,
-                                         routeID: Self.routeID(from: project.playerUrl))
+                                         playerRoute: Self.playerRoute(from: project.playerUrl))
             state = .created(created, .refreshing)
             await refreshAndOpen(created, ticket: ticket)
         } catch {
@@ -137,7 +153,7 @@ final class ProjectCreationCoordinator {
     /// navigation failed. It never calls POST /projects again.
     func refreshLibrary() async {
         switch state {
-        case .created(var created, let stage):
+        case .created(let created, let stage):
             guard !stage.isBusy else { return }
             guard isCurrentAccount(created.accountID) else {
                 invalidate()
@@ -145,34 +161,38 @@ final class ProjectCreationCoordinator {
             }
             let ticket = UUID()
             operation = ticket
-            state = .created(created, .refreshing)
+            updateStage(.refreshing)
             do {
                 guard let snapshot = try await completeLibrary(ticket: ticket,
                                                                accountID: created.accountID) else { return }
-                if let item = Self.item(for: created.project.id, in: snapshot.library) {
-                    created.libraryItem = item
-                    state = .created(created, .opening)
+                guard let current = createdProject else { return }
+                if let item = Self.item(for: current.project.id, in: snapshot.library) {
+                    var updated = current
+                    updated.libraryItem = item
+                    state = .created(updated, .opening)
+                    guard let destination = openDestination(for: updated) else {
+                        updateStage(.openFailed("Samply did not provide a player link for this project. Refresh Library and open it there."))
+                        return
+                    }
                     do {
-                        guard let opened = try await open(item: item, ticket: ticket,
-                                                          accountID: created.accountID) else { return }
-                        state = .created(created, .opened)
-                        onProjectOpened?(item, opened)
+                        try await openDestination(destination, ticket: ticket,
+                                                  accountID: created.accountID)
                     } catch is CancellationError {
                         guard isCurrent(ticket, accountID: created.accountID) else { return }
-                        state = .created(created, .openFailed(Self.interruptedOpenMessage))
+                        updateStage(.openFailed(Self.interruptedOpenMessage))
                     } catch {
                         guard isCurrent(ticket, accountID: created.accountID) else { return }
-                        state = .created(created, .openFailed(Self.openFailureMessage(error)))
+                        updateStage(.openFailed(Self.openFailureMessage(error)))
                     }
                 } else {
-                    state = .created(created, .delayed)
+                    updateStage(.delayed)
                 }
             } catch is CancellationError {
                 guard isCurrent(ticket, accountID: created.accountID) else { return }
-                state = .created(created, .refreshFailed(Self.interruptedRefreshMessage))
+                updateStage(.refreshFailed(Self.interruptedRefreshMessage))
             } catch {
                 guard isCurrent(ticket, accountID: created.accountID) else { return }
-                state = .created(created, .refreshFailed(Self.refreshFailureMessage(error)))
+                updateStage(.refreshFailed(Self.refreshFailureMessage(error)))
             }
 
         case .uncertain:
@@ -192,25 +212,23 @@ final class ProjectCreationCoordinator {
             invalidate()
             return
         }
-        guard let item = created.openItem else {
-            state = .created(created, .openFailed(
+        guard let destination = openDestination(for: created) else {
+            updateStage(.openFailed(
                 "Samply did not provide a player link for this project. Refresh Library and open it there."))
             return
         }
         let ticket = UUID()
         operation = ticket
-        state = .created(created, .opening)
+        updateStage(.opening)
         do {
-            guard let opened = try await open(item: item, ticket: ticket,
-                                              accountID: created.accountID) else { return }
-            state = .created(created, .opened)
-            onProjectOpened?(item, opened)
+            try await openDestination(destination, ticket: ticket,
+                                      accountID: created.accountID)
         } catch is CancellationError {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
-            state = .created(created, .openFailed(Self.interruptedOpenMessage))
+            updateStage(.openFailed(Self.interruptedOpenMessage))
         } catch {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
-            state = .created(created, .openFailed(Self.openFailureMessage(error)))
+            updateStage(.openFailed(Self.openFailureMessage(error)))
         }
     }
 
@@ -244,31 +262,34 @@ final class ProjectCreationCoordinator {
         do {
             guard let snapshot = try await completeLibrary(ticket: ticket,
                                                            accountID: created.accountID) else { return }
-            if let item = Self.item(for: created.project.id, in: snapshot.library) {
-                var updated = created
+            guard let current = createdProject else { return }
+            if let item = Self.item(for: current.project.id, in: snapshot.library) {
+                var updated = current
                 updated.libraryItem = item
                 state = .created(updated, .opening)
+                guard let destination = openDestination(for: updated) else {
+                    updateStage(.openFailed("Samply did not provide a player link for this project. Refresh Library and open it there."))
+                    return
+                }
                 do {
-                    guard let opened = try await open(item: item, ticket: ticket,
-                                                      accountID: created.accountID) else { return }
-                    state = .created(updated, .opened)
-                    onProjectOpened?(item, opened)
+                    try await openDestination(destination, ticket: ticket,
+                                              accountID: created.accountID)
                 } catch is CancellationError {
                     guard isCurrent(ticket, accountID: created.accountID) else { return }
-                    state = .created(updated, .openFailed(Self.interruptedOpenMessage))
+                    updateStage(.openFailed(Self.interruptedOpenMessage))
                 } catch {
                     guard isCurrent(ticket, accountID: created.accountID) else { return }
-                    state = .created(updated, .openFailed(Self.openFailureMessage(error)))
+                    updateStage(.openFailed(Self.openFailureMessage(error)))
                 }
             } else {
-                state = .created(created, .delayed)
+                updateStage(.delayed)
             }
         } catch is CancellationError {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
-            state = .created(created, .refreshFailed(Self.interruptedRefreshMessage))
+            updateStage(.refreshFailed(Self.interruptedRefreshMessage))
         } catch {
             guard isCurrent(ticket, accountID: created.accountID) else { return }
-            state = .created(created, .refreshFailed(Self.refreshFailureMessage(error)))
+            updateStage(.refreshFailed(Self.refreshFailureMessage(error)))
         }
     }
 
@@ -313,16 +334,69 @@ final class ProjectCreationCoordinator {
         return snapshot
     }
 
-    private func open(item: LibraryItem, ticket: UUID,
+    private func openDestination(for created: CreatedProject) -> OpenDestination? {
+        let projectID = created.project.id
+        let baseItem = created.libraryItem ?? created.openItem
+        if let shareID = created.libraryItem?.shareID, !shareID.isEmpty,
+           let baseItem {
+            return OpenDestination(routeID: shareID, token: nil,
+                                   item: baseItem, projectID: projectID)
+        }
+        if let playerRoute = created.playerRoute, let baseItem {
+            return OpenDestination(routeID: playerRoute.pathID, token: playerRoute.token,
+                                   item: baseItem, projectID: projectID)
+        }
+        guard let baseItem, !baseItem.routeID.isEmpty else { return nil }
+        return OpenDestination(routeID: baseItem.routeID, token: nil,
+                               item: baseItem, projectID: projectID)
+    }
+
+    private func openDestination(_ destination: OpenDestination, ticket: UUID,
+                                 accountID: String) async throws {
+        guard let snapshot = try await open(destination, ticket: ticket,
+                                            accountID: accountID) else { return }
+        guard let item = openedItem(destination.item, snapshot: snapshot,
+                                    projectID: destination.projectID) else { return }
+        markOpened(item, snapshot: snapshot)
+    }
+
+    private func open(_ destination: OpenDestination, ticket: UUID,
                       accountID: String) async throws -> WebSnapshot? {
-        let snapshot: WebSnapshot = try await web.call("browse",
-                                                       arguments: ["routeID": item.routeID])
+        var arguments: [String: Any] = [
+            "routeID": destination.routeID,
+            "projectID": destination.projectID
+        ]
+        if let token = destination.token { arguments["token"] = token }
+        let snapshot: WebSnapshot = try await web.call("browse", arguments: arguments)
         guard isCurrent(ticket, accountID: accountID) else { return nil }
         guard snapshot.version == 1, snapshot.account?.uid == accountID,
-              snapshot.hasLoadedBoxes(for: item, groupID: nil) else {
+              snapshot.projectID == destination.projectID,
+              snapshot.hasLoadedBoxes(routeID: snapshot.routeID ?? "", groupID: nil,
+                                      expectedProjectID: destination.projectID) else {
             throw SamplyError.invalidResponse
         }
         return snapshot
+    }
+
+    private func openedItem(_ item: LibraryItem, snapshot: WebSnapshot,
+                            projectID: String) -> LibraryItem? {
+        guard let routeID = snapshot.routeID, !routeID.isEmpty else { return nil }
+        var opened = item
+        opened.projectID = projectID
+        opened.shareID = routeID
+        return opened
+    }
+
+    private func markOpened(_ item: LibraryItem, snapshot: WebSnapshot) {
+        guard var created = createdProject else { return }
+        created.libraryItem = item
+        state = .created(created, .opened)
+        onProjectOpened?(item, snapshot)
+    }
+
+    private func updateStage(_ stage: Stage) {
+        guard case .created(let created, _) = state else { return }
+        state = .created(created, stage)
     }
 
     private func isCurrent(_ ticket: UUID, accountID: String) -> Bool {
@@ -333,14 +407,22 @@ final class ProjectCreationCoordinator {
         !web.isSigningOut && web.accountID == accountID
     }
 
-    static func routeID(from playerURL: URL?) -> String? {
+    static func playerRoute(from playerURL: URL?) -> PlayerRoute? {
         guard let playerURL, playerURL.scheme?.lowercased() == "https",
               playerURL.host?.lowercased() == "samply.app", playerURL.port == nil,
               playerURL.user == nil, playerURL.password == nil else { return nil }
         let components = playerURL.pathComponents.filter { $0 != "/" }
         guard components.count == 2, components[0] == "p" else { return nil }
-        let routeID = components[1]
-        return routeID.isEmpty ? nil : routeID
+        let pathID = components[1]
+        guard !pathID.isEmpty else { return nil }
+        let token = URLComponents(url: playerURL, resolvingAgainstBaseURL: false)?
+            .queryItems?.first(where: { $0.name == "token" })?.value
+        return PlayerRoute(pathID: pathID,
+                           token: token.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    static func routeID(from playerURL: URL?) -> String? {
+        playerRoute(from: playerURL)?.pathID
     }
 
     private static func item(for projectID: String, in library: [LibraryItem]) -> LibraryItem? {

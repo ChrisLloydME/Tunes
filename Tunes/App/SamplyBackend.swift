@@ -94,7 +94,8 @@ final class SamplyBackend {
         if state.libraryReady { library = state.library }
         playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
-           state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id) {
+           state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id,
+                                expectedProjectID: selectedItem.projectID) {
             boxes = state.boxes
             albumLoadState = .loaded
         }
@@ -145,11 +146,13 @@ final class SamplyBackend {
             guard let self else { return }
             do {
                 var args: [String: Any] = ["routeID": item.routeID]
+                if let projectID = item.projectID { args["projectID"] = projectID }
                 if let groupID { args["groupID"] = groupID }
                 let state: WebSnapshot = try await web.call("browse", arguments: args)
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
-                if state.hasLoadedBoxes(for: item, groupID: groupID) {
+                if state.hasLoadedBoxes(for: item, groupID: groupID,
+                                        expectedProjectID: item.projectID) {
                     boxes = state.boxes
                     albumLoadState = .loaded
                 }
@@ -252,7 +255,8 @@ final class SamplyBackend {
             case .album(let routeID, let groupID):
                 guard generation == selectionGeneration, let selectedItem,
                       selectedItem.routeID == routeID, folderPath.last?.id == groupID else { return }
-                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID) else {
+                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID,
+                                           expectedProjectID: selectedItem.projectID) else {
                     throw SamplyError.invalidResponse
                 }
                 boxes = state.boxes
@@ -301,12 +305,15 @@ final class SamplyBackend {
     /// fabricated into the native grid.
     private func acceptCreatedProject(_ item: LibraryItem, _ snapshot: WebSnapshot) {
         guard web.snapshot?.account?.uid == snapshot.account?.uid else { return }
+        var opened = item
+        if let routeID = snapshot.routeID, !routeID.isEmpty { opened.shareID = routeID }
+        if let projectID = snapshot.projectID { opened.projectID = projectID }
         invalidateSelection()
-        selectedItem = item
+        selectedItem = opened
         boxes = snapshot.boxes
         albumLoadState = .loaded
-        if let index = library.firstIndex(where: { $0.id == item.id }) {
-            library[index] = item
+        if let index = library.firstIndex(where: { $0.id == opened.id }) {
+            library[index] = opened
         }
     }
 
