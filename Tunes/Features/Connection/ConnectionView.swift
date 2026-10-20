@@ -24,8 +24,8 @@ struct ConnectionView: View {
             .tabItem { Label("Account", systemImage: "person.crop.circle") }
 
             settingsPage(
-                title: "Upload Settings",
-                detail: "Connect a personal access token to upload original files."
+                title: "API Access",
+                detail: "Connect a personal access token to create projects and upload original files."
             ) {
                 tokenSection
                 ConnectionSettingsSection(title: "Token Storage") {
@@ -46,7 +46,7 @@ struct ConnectionView: View {
                         .accessibilityLabel(message)
                 }
             }
-            .tabItem { Label("Uploads", systemImage: "arrow.up.circle") }
+            .tabItem { Label("API Access", systemImage: "key") }
         }
         .frame(width: 700, height: 560)
         .disabled(isSaving || backend.web.isSigningOut)
@@ -102,7 +102,7 @@ struct ConnectionView: View {
                 ConnectionSettingsDivider()
                 ConnectionSettingsRow(
                     title: "Sign Out",
-                    detail: "Stop playback and remove this app's session and upload token.",
+                    detail: "Stop playback and remove this app's session and personal access token.",
                     systemImage: "rectangle.portrait.and.arrow.right"
                 ) {
                     Button("Sign Out", role: .destructive) { signOut() }
@@ -136,7 +136,7 @@ struct ConnectionView: View {
     private var tokenSection: some View {
         ConnectionSettingsSection(title: "Personal Access Token") {
             ConnectionSettingsRow(
-                title: backend.hasToken ? "Token Added" : "Optional Upload Access",
+                title: backend.hasToken ? "Token Added" : "Optional API Access",
                 detail: backend.hasToken
                     ? "A verified token is saved on this Mac."
                     : "Sign in, then add a token from the same Samply account.",

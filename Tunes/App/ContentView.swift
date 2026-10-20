@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Bindable var backend: SamplyBackend
     @State private var showConnection = false
+    @State private var showNewProject = false
     @State private var showsProject = false
     @State private var showsIssueDetails = false
 
@@ -91,6 +92,20 @@ struct ContentView: View {
                         .disabled(backend.isPlayingSelection)
                     }
                 }
+                ToolbarItem {
+                    if !showsProject {
+                        Button { showNewProject = true } label: {
+                            Label("New Project", systemImage: "plus")
+                                .labelStyle(.iconOnly)
+                                .font(.system(size: 18, weight: .semibold))
+                                .frame(width: 24, height: 24)
+                        }
+                        .help("New Project")
+                        .accessibilityLabel("New Project")
+                        .accessibilityIdentifier("newProject")
+                        .disabled(!backend.isConnected || backend.projectCreation.isCreating)
+                    }
+                }
                 ToolbarItemGroup {
                     Button { Task { await backend.refresh(currentPage) } } label: {
                         Label(currentPage.refreshLabel, systemImage: "arrow.clockwise")
@@ -117,6 +132,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showConnection) { ConnectionView(backend: backend) }
+        .sheet(isPresented: $showNewProject) { NewProjectSheet(backend: backend) }
         .focusedSceneValue(\.samplyPage, currentPage)
         .frame(minWidth: 860, minHeight: 560)
         .task { backend.start() }
@@ -136,7 +152,7 @@ struct ContentView: View {
             if value == nil { showsIssueDetails = false }
         }
         .onChange(of: backend.selectedItem?.id) { _, id in
-            if id == nil { showsProject = false }
+            showsProject = id != nil
         }
     }
 

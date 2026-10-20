@@ -8,7 +8,7 @@ enum SamplyError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .noToken: "Add a Samply Personal Access Token in Connection Settings first."
-        case .noAccount: "Sign in to Samply before saving an upload token."
+        case .noAccount: "Sign in to Samply before saving a personal access token."
         case .invalidToken: "Your token is invalid or expired. Update it in Connection Settings."
         case .invalidIdentifier: "Invalid Samply resource ID."
         case .invalidResponse: "Samply returned an unexpected response."
