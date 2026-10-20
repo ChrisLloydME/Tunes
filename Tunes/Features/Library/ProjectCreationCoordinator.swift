@@ -672,6 +672,10 @@ final class ProjectCreationCoordinator {
         var opened = item
         opened.projectID = projectID
         opened.shareID = routeID
+        // The account just created this project, so expose the existing upload
+        // action even if the freshly propagated Library permission helper lags.
+        // The upload endpoint still enforces Samply's server-side permissions.
+        opened.canUpload = true
         return opened
     }
 

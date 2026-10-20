@@ -311,6 +311,7 @@ final class SamplyBackend {
         var opened = item
         if let routeID = snapshot.routeID, !routeID.isEmpty { opened.shareID = routeID }
         if let projectID = snapshot.projectID { opened.projectID = projectID }
+        opened.canUpload = true
         invalidateSelection()
         selectedItem = opened
         boxes = snapshot.boxes

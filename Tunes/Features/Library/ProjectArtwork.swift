@@ -117,7 +117,8 @@ enum ProjectArtworkProcessor {
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: "\\", with: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        let fileName = (cleaned.isEmpty ? "Project Artwork" : cleaned) + ".jpg"
+        let baseName = cleaned.isEmpty ? "Project Artwork" : String(cleaned.prefix(160))
+        let fileName = baseName + ".jpg"
         for quality in [0.86, 0.72, 0.55] as [CGFloat] {
             let output = NSMutableData()
             guard let destination = CGImageDestinationCreateWithData(

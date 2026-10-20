@@ -69,7 +69,8 @@ struct ProjectCreationTests {
         #expect(refreshed == [item])
         #expect(coordinator.createdStage == .opened)
         #expect(coordinator.createdProject?.libraryItem == item)
-        #expect(opened?.0 == item)
+        #expect(opened?.0.canUpload == true)
+        #expect(opened?.0.projectID == "project-1")
         #expect(opened?.1.routeID == "share-1")
     }
 

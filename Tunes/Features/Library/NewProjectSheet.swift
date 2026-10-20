@@ -91,7 +91,11 @@ struct NewProjectSheet: View {
             artworkStore.remove()
             cancelPhotoLoad()
             initialFiles = []
-            if creation.canFinishCreatedProject { creation.reset() }
+            if creation.canFinishCreatedProject {
+                creation.reset()
+            } else if case .failed = creation.state {
+                creation.reset()
+            }
         }
     }
 

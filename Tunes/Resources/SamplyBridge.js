@@ -259,7 +259,8 @@
         assertAccount();
         const uid = account().uid;
         const projectID = text(args.projectID);
-        if (!projectID) return {status: 'failed', message: 'Missing project identity.'};
+        if (!projectID || projectID.includes('/') || projectID.includes('\\'))
+            return {status: 'failed', message: 'Missing project identity.'};
         if (text(args.mimeType)?.startsWith('image/') !== true)
             return {status: 'failed', message: 'The selected artwork is not a supported image.'};
         const fileName = text(args.fileName);
