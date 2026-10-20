@@ -10,6 +10,7 @@ final class SamplyBackend {
     let api: SamplyAPI
     let playback: PlaybackController
     let uploader: SamplyUploader
+    let projectCreation: ProjectCreationCoordinator
     private(set) var library: [LibraryItem] = []
     private(set) var boxes: [WebBox] = []
     private(set) var selectedItem: LibraryItem?
@@ -39,8 +40,15 @@ final class SamplyBackend {
         self.api = api
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
+        projectCreation = ProjectCreationCoordinator(api: api, web: web)
         do { hasToken = try tokens.read() != nil }
         catch { recordFailure(error) }
+        projectCreation.onLibraryRefreshed = { [weak self] items in
+            self?.library = items
+        }
+        projectCreation.onProjectOpened = { [weak self] item, snapshot in
+            self?.acceptCreatedProject(item, snapshot)
+        }
     }
 
     var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
@@ -68,6 +76,7 @@ final class SamplyBackend {
         guard let state = web.snapshot, state.authenticationState != .checking else { return }
         let newAccount = state.account?.uid
         if !hasResolvedTokenAccount || newAccount != accountID {
+            projectCreation.invalidate()
             invalidateSelection()
             library = []
             playback.clear()
@@ -275,6 +284,7 @@ final class SamplyBackend {
     }
 
     func signOut() async {
+        projectCreation.invalidate()
         invalidateSelection()
         library = []
         playback.clear()
@@ -284,6 +294,20 @@ final class SamplyBackend {
         catch { recordFailure(error) }
         accountID = nil
         await web.signOut()
+    }
+
+    /// Applies a project opened through the adapter after REST creation. The
+    /// complete Library was already refreshed, so a delayed history entry is not
+    /// fabricated into the native grid.
+    private func acceptCreatedProject(_ item: LibraryItem, _ snapshot: WebSnapshot) {
+        guard web.snapshot?.account?.uid == snapshot.account?.uid else { return }
+        invalidateSelection()
+        selectedItem = item
+        boxes = snapshot.boxes
+        albumLoadState = .loaded
+        if let index = library.firstIndex(where: { $0.id == item.id }) {
+            library[index] = item
+        }
     }
 
     private func invalidateSelection() {
