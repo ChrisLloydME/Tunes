@@ -25,7 +25,7 @@ struct ConnectionView: View {
 
             settingsPage(
                 title: "API Access",
-                detail: "Connect a personal access token to create projects and upload original files."
+                detail: "Connect a personal access token to create projects. Artwork uses your Samply web session; original files use the token."
             ) {
                 tokenSection
                 ConnectionSettingsSection(title: "Token Storage") {

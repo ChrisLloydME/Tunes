@@ -16,7 +16,7 @@ Tunes/
 │   ├── SamplyBackend.swift      Dependency assembly and account, browsing, playback, creation, and upload coordination
 │   └── SamplyPageFocus.swift    Exposes the current page to menus through SwiftUI FocusedValues
 ├── Features/
-│   ├── Library/                 Library grid, search, selection, project creation, and creation sheet
+│   ├── Library/                 Library grid, search, selection, project creation, artwork staging, and creation sheet
 │   ├── Album/                   Albums, folders, tracks, versions, and presentation calculations
 │   │   └── Kaset/              Kaset-derived album components
 │   ├── Playback/               PlaybackController, player bar, and interactions
@@ -77,7 +77,7 @@ The diagram shows the main calls. Connection views also call `SamplyWebSession` 
 | --- | --- | --- |
 | `TunesApp` | One app-wide `SamplyBackend` | `@State` shares it across scenes |
 | `SamplyBackend` | Library, selected album/folder, tracks, loading/operation state, creation owner; assembles web, api, playback, uploader, and project creation | Snapshot polling and explicit command results |
-| `ProjectCreationCoordinator` | Single creation request, confirmed result, Library-refresh/navigation stage, and ambiguous-outcome state | REST creation, adapter refresh/browse results, and account invalidation |
+| `ProjectCreationCoordinator` | Single creation request, confirmed result, ordered initial uploads, artwork assignment, Library-refresh/navigation stage, and ambiguous-outcome state | REST creation, upload results, adapter artwork/refresh/browse results, and account invalidation |
 | `SamplyWebSession` | Main WebView, persistent website data store, sign-in window/pop-ups, authentication state, latest snapshot, and bridge health | WebKit navigation and bridge calls |
 | `PlaybackController` | Native playback snapshot, errors, and system media controls | Web playback snapshots and command results |
 | `SamplyUploader` | Single upload task, progress, status, and resulting box ID | Upload-ticket creation, file PUT, and delegate callbacks |
@@ -135,23 +135,33 @@ sequenceDiagram
     participant A as SamplyAPI
     participant W as SamplyWebSession
     participant J as SamplyBridge.js
-    V->>B: create(name)
+    V->>B: create(name, artwork?, files[])
     B->>B: Capture account + operation
     B->>A: POST /projects {name}
     A-->>B: Project object + playerUrl
     B->>B: Retain confirmed creation
+    par Optional stages
+        B->>W: call("setProjectArtwork")
+        W->>J: System upload + project writeback
+        J-->>B: Confirmed / submitted / unsupported
+    and Ordered initial files
+        B->>A: Upload tickets and streamed PUTs
+        A-->>B: Per-file outcomes
+    end
     B->>W: call("refreshPage", library)
     W->>J: Complete authenticated history read
     J-->>W: WebSnapshot
     W-->>B: Library including shared projects
-    B->>W: call("browse", routeID)
-    W->>J: Existing /p/<shareid> navigation
-    J-->>W: Loaded album snapshot
-    W-->>B: Open result
-    B-->>V: Opened or retained failure stage
+    B->>W: call("browse", playerUrl path + token, projectID)
+    W->>J: Existing /p/<identity> navigation
+    J-->>W: Loaded album snapshot, including empty boxes
+    W-->>B: Open result with live share route
+    B-->>V: Independent stage outcomes
 ```
 
-The POST is never automatically retried. Timeouts, connection loss, cancellation, 5xx responses, and malformed success responses are ambiguous: the project may exist. The sheet then explains that possibility and offers a read-only Library refresh before another attempt. A confirmed creation outlives a later refresh or navigation failure; those stages offer Refresh Library or Open Project and never repeat Create. If the complete Library has not yet included the new history entry, the coordinator derives the existing `/p/<shareid>` route from the documented `playerUrl` instead of inventing another route. Sign-out or account changes invalidate stale completions. The WebView is not reloaded, playback is not reset, and the opened project uses the existing album upload flow.
+The POST is never automatically retried. Timeouts, connection loss, cancellation, 5xx responses, and malformed success responses are ambiguous: the project may exist. The sheet then explains that possibility and offers a read-only Library refresh before another attempt. A confirmed creation outlives later artwork, upload, refresh, or navigation failures; retries never repeat the project POST and never delete completed remote work. Artwork and initial files are independent outcomes. Initial files upload one at a time from the confirmed project ID without waiting for player navigation; successful files remain successful when a later file fails. Ambiguous upload tickets or PUTs are not retried automatically, while definite failures and cancellations can be retried explicitly without resubmitting completed files.
+
+The documented player link may use a path identity different from the live share identity and carry the share in a `token` query. The adapter sends both, lets Samply's player view resolve the link, and then requires the loaded player's project ID to match. Empty boxes are accepted only after the player and files stores report readiness and publish an empty view-model array. If the complete Library has not yet included the new history entry, the coordinator still uses the confirmed player link. After opening, it records the live share route for refresh and playback commands. Sign-out or account changes invalidate stale completions and cancel pending artwork/upload callbacks. The WebView is not reloaded and playback is not reset during creation.
 
 ### Playback and system controls
 
@@ -169,7 +179,7 @@ The player bar's artwork and artwork glow use the playing `LibraryItem.artwork`,
 
 `ContentView` owns a recovery task that cancels when the page or recovery requirement changes. It calls `backend.recover` with backoff from 250 milliseconds to 2 seconds. Recovery retries reads only; it never replays playback, seek, or upload operations. Explicit permission denials and contract errors are not treated as automatically recoverable transient failures.
 
-### Optional original-file uploads
+### Optional uploads and artwork
 
 `ConnectionView → backend.saveToken → SamplyAPI.projects(token:) → FileTokenStore` validates the PAT. `backend.chooseUpload` selects one original file and passes it to `SamplyUploader`:
 
@@ -177,6 +187,10 @@ The player bar's artwork and artwork glow use the playing `LibraryItem.artwork`,
 2. Use the PAT to request an upload ticket from the official REST API; do not automatically replay the POST.
 3. Recheck the file, then PUT it from disk using a separate storage session without a PAT or cookies, including the metadata required by the ticket.
 4. Use an operation ID to discard progress/completion callbacks after cancellation or reset.
+
+Initial files selected in the New Project sheet use the same awaitable upload operation sequentially after the project is confirmed, without waiting for album or player navigation. Each file retains its own progress, cancellation, definite-failure, and uncertain outcome. Retrying failed files skips completed files and files whose outcome is ambiguous. The existing album upload remains the visible single-file flow.
+
+Project artwork uses a separate authorized web contract because the official Projects API exposes artwork as read-only. The native sheet validates and downsamples the chosen image, then the adapter performs Samply's system upload with project writeback and confirms the project document's artwork value changed. If that contract or confirmation is unavailable, the sheet reports the artwork stage as unsupported or uncertain rather than treating an ordinary file upload as artwork.
 
 A successful PUT only confirms data submission; Samply may still be processing it. The API's download-ticket query capability is not connected to playback.
 
@@ -199,11 +213,11 @@ See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation,
 | Player bar and artwork | `Features/Playback/`, `Features/Album/Kaset/` | `PlayerBarSeekHoldTests`, `AlbumPaletteTests` + manual checks |
 | Web contracts, controls, refresh | `Resources/SamplyBridge.js`, `Samply/Web/` | Node protocol tests, `SamplyBridgeHealthTests`, `PlaybackRecoveryTests` |
 | Email sign-in and authentication state | `Features/Connection/`, `Samply/Authentication/`, `Samply/Web/` | `EmailSignInLinkTests` (in `TunesTests.swift`), `WebAuthenticationStateTests` |
-| REST, PATs, project creation, uploads | `Samply/REST/`, `Features/Library/ProjectCreationCoordinator.swift`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift`, isolated creation tests in `ProjectCreationTests.swift`; temporary-directory storage tests in `FileTokenStoreTests.swift` |
+| REST, PATs, project creation, artwork, uploads | `Samply/REST/`, `Features/Library/ProjectCreationCoordinator.swift`, `Features/Library/ProjectArtwork.swift`, `Samply/Authentication/TokenStore.swift` | Mock URLProtocol tests in `TunesTests.swift`, isolated creation/artwork tests in `ProjectCreationTests.swift` and `ProjectArtworkTests.swift`; temporary-directory storage tests in `FileTokenStoreTests.swift` |
 
 Build and test commands are in the [README](../README.md#verification). Run only `TunesTests` and Node protocol tests. `TunesUITests` is a legacy template containing app-launch code; do not run it. Computer Use, browser automation, UI tests, and screenshots of the running app are prohibited for validation.
 
-The user must manually verify real Samply sign-in, shared content, playback, seeking, project creation, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
+The user must manually verify real Samply sign-in, shared content, playback, seeking, project creation with artwork and initial files, empty projects, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
 
 ## When to split responsibilities further
 
