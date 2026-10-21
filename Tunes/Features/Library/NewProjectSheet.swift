@@ -719,6 +719,7 @@ struct NewProjectSheet: View {
                 guard generation == selectionGeneration,
                       account == accountID else { return }
                 var seen = Set(filesToUpload.map { $0.url.standardizedFileURL.path })
+                seen.formUnion(creation.initialFiles.map { $0.url.standardizedFileURL.path })
                 for url in urls {
                     let path = url.standardizedFileURL.path
                     guard seen.insert(path).inserted else { continue }
