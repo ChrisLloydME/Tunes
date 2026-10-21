@@ -144,7 +144,7 @@ sequenceDiagram
         B->>W: call("setProjectArtwork")
         W->>J: System upload + project writeback
         J-->>B: Confirmed / submitted / unsupported
-    and Ordered initial files
+    and Ordered file uploads
         B->>A: Upload tickets and streamed PUTs
         A-->>B: Per-file outcomes
     end
@@ -159,7 +159,7 @@ sequenceDiagram
     B-->>V: Independent stage outcomes
 ```
 
-The POST is never automatically retried. Timeouts, connection loss, cancellation, 5xx responses, and malformed success responses are ambiguous: the project may exist. The sheet then explains that possibility and offers a read-only Library refresh before another attempt. A confirmed creation outlives later artwork, upload, refresh, or navigation failures; retries never repeat the project POST and never delete completed remote work. Artwork and initial files are independent outcomes. Initial files upload one at a time from the confirmed project ID without waiting for player navigation; successful files remain successful when a later file fails. Ambiguous upload tickets or PUTs are not retried automatically, while definite failures and cancellations can be retried explicitly without resubmitting completed files.
+The POST is never automatically retried. Timeouts, connection loss, cancellation, 5xx responses, and malformed success responses are ambiguous: the project may exist. The sheet then explains that possibility and offers a read-only Library refresh before another attempt. A confirmed creation outlives later artwork, upload, refresh, or navigation failures; retries never repeat the project POST and never delete completed remote work. Artwork and files added after creation are independent outcomes. Files upload one at a time from the confirmed project ID without waiting for player navigation; successful files remain successful when a later file fails. Ambiguous upload tickets or PUTs are not retried automatically, while definite failures and cancellations can be retried explicitly without resubmitting completed files.
 
 The documented player link may use a path identity different from the live share identity and carry the share in a `token` query. The adapter sends both, lets Samply's player view resolve the link, and then requires the loaded player's project ID to match. Empty boxes are accepted only after the player and files stores report readiness and publish an empty view-model array. If the complete Library has not yet included the new history entry, the coordinator still uses the confirmed player link. After opening, it records the live share route for refresh and playback commands. Sign-out or account changes invalidate stale completions and cancel pending artwork/upload callbacks. The WebView is not reloaded and playback is not reset during creation.
 
@@ -188,7 +188,7 @@ The player bar's artwork and artwork glow use the playing `LibraryItem.artwork`,
 3. Recheck the file, then PUT it from disk using a separate storage session without a PAT or cookies, including the metadata required by the ticket.
 4. Use an operation ID to discard progress/completion callbacks after cancellation or reset.
 
-Initial files selected in the New Project sheet use the same awaitable upload operation sequentially after the project is confirmed, without waiting for album or player navigation. Each file retains its own progress, cancellation, definite-failure, and uncertain outcome. Retrying failed files skips completed files and files whose outcome is ambiguous. The existing album upload remains the visible single-file flow.
+Files selected on the New Project file step use the same awaitable upload operation sequentially after the project is confirmed, without waiting for album or player navigation. Each file retains its own progress, cancellation, definite-failure, and uncertain outcome. Retrying failed files skips completed files and files whose outcome is ambiguous. The existing album upload remains the visible single-file flow.
 
 Project artwork uses a separate authorized web contract because the official Projects API exposes artwork as read-only. The native sheet validates and downsamples the chosen image, then the adapter performs Samply's system upload with project writeback and confirms the project document's artwork value changed. If that contract or confirmation is unavailable, the sheet reports the artwork stage as unsupported or uncertain rather than treating an ordinary file upload as artwork.
 
@@ -217,7 +217,7 @@ See [SamplyBackend.md](SamplyBackend.md) for web stores, refresh implementation,
 
 Build and test commands are in the [README](../README.md#verification). Run only `TunesTests` and Node protocol tests. `TunesUITests` is a legacy template containing app-launch code; do not run it. Computer Use, browser automation, UI tests, and screenshots of the running app are prohibited for validation.
 
-The user must manually verify real Samply sign-in, shared content, playback, seeking, project creation with artwork and initial files, empty projects, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
+The user must manually verify real Samply sign-in, shared content, playback, seeking, project creation with artwork and uploaded files, empty projects, and uploads with instructions provided in chat. Passing simulated tests does not establish real-world end-to-end web compatibility.
 
 ## When to split responsibilities further
 

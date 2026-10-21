@@ -2,7 +2,7 @@
 
 Tunes is a native macOS client for browsing albums and listening to music from Samply. SwiftUI and AppKit provide the Library, album pages, and playback controls, while a persistent WKWebView uses Samply's own authentication and streaming player.
 
-**Status: the connection layer and native interface are implemented. Email sign-in has been manually verified by the user. Playback, seeking, shared content, project creation with artwork and initial files, and uploads still need manual verification. Official authorization through the default browser is not yet available.**
+**Status: the connection layer and native interface are implemented. Email sign-in has been manually verified by the user. Playback, seeking, shared content, project creation with artwork and uploaded files, and uploads still need manual verification. Official authorization through the default browser is not yet available.**
 
 ## Run
 
@@ -42,9 +42,9 @@ These directories belong to one app target. See [Architecture and code navigatio
 - AAC and lossless options, with format and availability determined by Samply; quality changes preserve playback position.
 - macOS Now Playing integration and media keys.
 - Official REST integration for project creation, owned projects, project files, folders, stacks, signed download URL queries, and original-file upload tickets.
-- Native project creation from Library using the documented `POST /projects` request, with optional artwork and optional initial original files, followed by a complete web Library refresh and the existing web-backed album, playback, and upload flow.
+- Native project creation from Library using the documented `POST /projects` request, with optional artwork and optional files added after creation, followed by a complete web Library refresh and the existing web-backed album, playback, and upload flow.
 - Project artwork selection from Files or Photos with local validation and downsampling, assigned through Samply's authorized web upload path rather than an invented REST field.
-- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Initial files use an ordered, awaitable queue with per-file outcomes.
+- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file outcomes.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
 ## Local signing
