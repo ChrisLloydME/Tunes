@@ -339,6 +339,25 @@ struct ProjectCreationTests {
         #expect(coordinator.createdProject?.project.id == "project-1")
     }
 
+    @Test func filesCanBeAddedAfterProjectCreationWithoutAnotherCreate() async throws {
+        let file = try temporaryFile("After Create.wav")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let web = StubCreationWeb(libraryResponses: [.success(snapshot())])
+        let api = StubProjectAPI(result: .success(project()))
+        let uploader = StubFileUploader()
+        let coordinator = ProjectCreationCoordinator(api: api, web: web, fileUploader: uploader)
+
+        await coordinator.create(name: "Album")
+        #expect(coordinator.createdProject?.project.id == "project-1")
+        #expect(coordinator.initialFiles.isEmpty)
+
+        #expect(coordinator.addFiles([file]))
+        await waitUntil { !coordinator.isUploadingInitialFiles }
+        #expect(uploader.calls == ["After Create.wav"])
+        #expect(coordinator.initialFiles.first?.status == .uploaded(boxID: "box-1"))
+        #expect(api.names.count == 1)
+    }
+
     @Test func initialUploadsStartBeforeNavigationAndSurviveItsFailure() async throws {
         let file = try temporaryFile("Initial Mix.wav")
         defer { try? FileManager.default.removeItem(at: file) }

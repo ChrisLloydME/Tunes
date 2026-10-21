@@ -362,6 +362,28 @@ final class ProjectCreationCoordinator {
         state = .idle
     }
 
+    /// Adds files to an already confirmed project without creating it again.
+    /// Used by the post-creation file step.
+    @discardableResult
+    func addFiles(_ urls: [URL]) -> Bool {
+        guard !urls.isEmpty, case .created(let created, _) = state,
+              !isUploadingInitialFiles, isCurrentAccount(created.accountID) else { return false }
+        var seen = Set(initialFiles.map { $0.url.standardizedFileURL.path })
+        var added = false
+        for url in urls {
+            let path = url.standardizedFileURL.path
+            guard seen.insert(path).inserted else { continue }
+            initialFiles.append(InitialFile(url: url, fileName: url.lastPathComponent))
+            added = true
+        }
+        guard added else { return false }
+        initialUploadTask = Task { [weak self] in
+            await self?.uploadPendingFiles(projectID: created.project.id,
+                                           accountID: created.accountID)
+        }
+        return true
+    }
+
     func cancelInitialUploads() {
         guard isUploadingInitialFiles else { return }
         initialUploadTask?.cancel()
