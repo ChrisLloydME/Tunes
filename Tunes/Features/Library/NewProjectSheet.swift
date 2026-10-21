@@ -9,6 +9,7 @@ struct NewProjectSheet: View {
     }
 
     @Bindable var backend: SamplyBackend
+    var onReturnToLibrary: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var page: Page = .details
     @State private var name = ""
@@ -26,10 +27,11 @@ struct NewProjectSheet: View {
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var isPreparingArtwork: Bool { isTransferringPhoto || artworkStore.isLoading }
     private var showsFilesPage: Bool { page == .files && creation.createdProject != nil }
+    private var blocksFilesPageDismissal: Bool { creation.isUploadingInitialFiles }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
+            pageHeader
             Divider()
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -39,8 +41,9 @@ struct NewProjectSheet: View {
                 .padding(.vertical, 14)
         }
         .frame(width: 620, height: 640, alignment: .topLeading)
-        .interactiveDismissDisabled(creation.blocksDismissal)
+        .interactiveDismissDisabled(showsFilesPage ? blocksFilesPageDismissal : creation.blocksDismissal)
         .onAppear {
+            if creation.canFinishCreatedProject { creation.reset() }
             let currentAccount = backend.web.snapshot?.account?.uid
             accountID = currentAccount
             artworkStore.updateAccount(currentAccount)
@@ -82,19 +85,30 @@ struct NewProjectSheet: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("New Project")
+    @ViewBuilder private var pageHeader: some View {
+        if showsFilesPage, let created = creation.createdProject {
+            Text(created.project.name)
                 .font(.title2.weight(.semibold))
-                .accessibilityAddTraits(.isHeader)
-            Text("Create a project in Samply. Artwork and files are optional.")
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .lineLimit(2)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.top, 22)
+                .padding(.bottom, 16)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("New Project")
+                    .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
+                Text("Create a project in Samply.")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.top, 22)
+            .padding(.bottom, 16)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 24)
-        .padding(.top, 22)
-        .padding(.bottom, 16)
     }
 
     @ViewBuilder private var content: some View {
@@ -157,13 +171,17 @@ struct NewProjectSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 artworkPreview
                 artworkButtons
-                artworkStatusLine
+                if isPreparingArtwork {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(isTransferringPhoto ? "Loading photo…" : "Preparing artwork…")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let message = artworkStore.errorMessage {
+                    statusMessage(message, systemImage: "exclamationmark.triangle")
+                }
             }
-
-            Text("Artwork is assigned through Samply's authorized web session after the project is created.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -286,237 +304,117 @@ struct NewProjectSheet: View {
         .frame(height: 34)
     }
 
-    @ViewBuilder private var artworkStatusLine: some View {
-        Group {
-            if isPreparingArtwork {
-                Text(isTransferringPhoto ? "Loading photo…" : "Preparing artwork…")
-            } else if let message = artworkStore.errorMessage {
-                Text(message)
-            } else if artworkStore.selection != nil {
-                Text("Artwork ready to assign after creation.")
-            } else {
-                Text("Artwork is optional.")
-            }
-        }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .lineLimit(2)
-        .frame(height: 28, alignment: .topLeading)
-    }
-
     // MARK: - Files page
 
     private var filesPage: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if let created = creation.createdProject {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Text(created.project.name)
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(2)
-                        Spacer()
-                        Label("Project Created", systemImage: "checkmark.circle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                projectStageStatus
-                artworkSummary
-                Divider()
-                filesSection
-                if !creation.initialFiles.isEmpty {
-                    Divider()
-                    uploadsSection
-                }
-                navigationRecovery
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
-        }
-    }
-
-    private var projectStageStatus: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let stage = creation.createdStage {
-                Text(createdMessage(stage))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if stage.isBusy {
-                    ProgressView()
-                        .controlSize(.small)
-                        .accessibilityLabel(stage == .refreshing ? "Refreshing Library" : "Opening project")
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var artworkSummary: some View {
-        if creation.artworkState != .none {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    Text("Artwork")
-                        .font(.body.weight(.medium))
-                    Spacer()
-                    switch creation.artworkState {
-                    case .pending:
-                        ProgressView().controlSize(.small)
-                    case .assigned:
-                        Label("Assigned", systemImage: "checkmark.circle")
-                            .font(.caption)
-                    case .failed, .uncertain, .unsupported, .none:
-                        EmptyView()
-                    }
-                }
-                switch creation.artworkState {
-                case .none:
-                    EmptyView()
-                case .pending:
-                    Text("Assigning artwork in Samply…")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                case .assigned:
-                    Text("The project artwork was confirmed by Samply.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                case .failed(let message), .uncertain(let message), .unsupported(let message):
-                    statusMessage(message, systemImage: "exclamationmark.triangle")
-                }
-                if creation.canRetryArtwork {
-                    Button("Retry Artwork") { creation.retryArtwork() }
-                        .controlSize(.small)
-                }
-            }
-        }
-    }
-
-    private var filesSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 16) {
             HStack {
                 Text("Files")
-                    .font(.body.weight(.medium))
+                    .font(.headline)
                 Spacer()
-                Button("Choose Files…") { chooseFilesToUpload() }
-                    .disabled(creation.isUploadingInitialFiles)
-                    .accessibilityLabel("Choose files to upload")
+                Button {
+                    chooseFilesToUpload()
+                } label: {
+                    Label("Choose Files…", systemImage: "plus")
+                }
+                .disabled(creation.isUploadingInitialFiles)
+                .accessibilityLabel("Choose files to upload")
             }
-            if filesToUpload.isEmpty {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(.quaternary)
-                    .frame(height: 82)
-                    .overlay {
-                        Text("No files selected. Choose files to upload, or finish without adding files.")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                            .padding(12)
-                    }
+
+            if filesToUpload.isEmpty, creation.initialFiles.isEmpty {
+                VStack(spacing: 12) {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 34, weight: .regular))
+                        .foregroundStyle(.secondary)
+                    Text("No Files Selected")
+                        .font(.headline)
+                    Text("Choose original files to upload to this project.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, minHeight: 300)
+                .padding(24)
+                .background {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(.quaternary.opacity(0.45))
+                }
             } else {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        ForEach(filesToUpload) { file in
-                            HStack(spacing: 10) {
-                                Image(systemName: "doc")
-                                    .foregroundStyle(.secondary)
-                                Text(file.fileName)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                Spacer()
-                                Button {
-                                    filesToUpload.removeAll { $0.id == file.id }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
+                List {
+                    if !filesToUpload.isEmpty {
+                        Section("Ready to Upload") {
+                            ForEach(filesToUpload) { file in
+                                HStack(spacing: 12) {
+                                    Image(systemName: "doc")
+                                        .font(.title3)
                                         .foregroundStyle(.secondary)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(file.fileName)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Text("Ready to upload")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button {
+                                        filesToUpload.removeAll { $0.id == file.id }
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Remove \(file.fileName)")
+                                    .accessibilityLabel("Remove \(file.fileName)")
                                 }
-                                .buttonStyle(.plain)
-                                .help("Remove \(file.fileName)")
-                                .accessibilityLabel("Remove \(file.fileName)")
+                                .padding(.vertical, 4)
                             }
-                            .padding(.vertical, 6)
-                            if file.id != filesToUpload.last?.id { Divider() }
                         }
                     }
-                }
-                .frame(maxHeight: 150)
-                Text("Files upload in this order. Originals are streamed without transcoding.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 
-    private var uploadsSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Uploads")
-                    .font(.body.weight(.medium))
-                Spacer()
-                if creation.canRetryInitialFiles {
-                    Button("Retry Failed Files") { creation.retryFailedInitialFiles() }
-                        .controlSize(.small)
-                }
-            }
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(creation.initialFiles) { file in
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 8) {
-                                Image(systemName: initialFileSymbol(file.status))
-                                    .foregroundStyle(.secondary)
-                                Text(file.fileName)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                            }
-                            Text(initialFileStatus(file))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            if file.status == .uploading {
-                                ProgressView(value: file.progress)
+                    if !creation.initialFiles.isEmpty {
+                        Section("Uploads") {
+                            ForEach(creation.initialFiles) { file in
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: initialFileSymbol(file.status))
+                                        .font(.title3)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(file.fileName)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                        Text(initialFileStatus(file))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                        if file.status == .uploading {
+                                            ProgressView(value: file.progress)
+                                        }
+                                    }
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.vertical, 4)
                             }
                         }
                     }
                 }
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
             }
-            .frame(maxHeight: 190)
-            if creation.hasUncertainInitialFiles {
-                Text("An uncertain upload may already exist in the project. Check the project in Samply before retrying.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if creation.initialFiles.contains(where: { $0.status == .cancelled }) {
-                Text("Cancelling uploads does not remove files already submitted to Samply.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if creation.initialFiles.contains(where: {
-                if case .uploaded = $0.status { return true }
-                return false
-            }) {
-                Text("A successful upload confirms Samply received the original file; processing may continue.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
 
-    @ViewBuilder private var navigationRecovery: some View {
-        if creation.createdStage != .opened || creation.canOpenCreatedProject {
-            HStack(spacing: 10) {
-                Button("Refresh Library") {
-                    Task { await creation.refreshLibrary() }
-                }
-                .disabled(creation.createdStage?.isBusy == true)
-                if creation.canOpenCreatedProject {
-                    Button("Open Project") {
-                        Task { await creation.openCreatedProject() }
+            if creation.canRetryInitialFiles {
+                HStack {
+                    Spacer()
+                    Button("Retry Failed Files") {
+                        creation.retryFailedInitialFiles()
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(creation.createdStage?.isBusy == true)
                 }
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(24)
     }
 
     // MARK: - Guidance
@@ -557,28 +455,28 @@ struct NewProjectSheet: View {
 
     @ViewBuilder private var footerLeadingButton: some View {
         if showsFilesPage {
-            Button("Close") { close() }
-                .disabled(creation.blocksDismissal)
+            Button("Close") { returnToLibrary() }
+                .disabled(blocksFilesPageDismissal)
         } else {
             switch creation.state {
             case .idle, .failed:
                 if backend.isConnected, backend.hasToken {
-                    Button("Cancel") { close() }
+                    Button("Cancel") { closeDetails() }
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("cancelNewProject")
                 } else {
-                    Button("Close") { close() }
+                    Button("Close") { returnToLibrary() }
                         .keyboardShortcut(.cancelAction)
                 }
             case .creating:
                 Button("Cancel") {}.disabled(true)
                     .accessibilityIdentifier("cancelNewProject")
             case .uncertain:
-                Button("Close") { close() }
+                Button("Close") { returnToLibrary() }
                     .keyboardShortcut(.cancelAction)
                     .disabled(creation.isRefreshingAfterUncertain)
             case .created:
-                Button("Close") { close() }
+                Button("Close") { returnToLibrary() }
                     .disabled(creation.blocksDismissal)
             }
         }
@@ -590,9 +488,9 @@ struct NewProjectSheet: View {
                 Button("Cancel Uploads") { creation.cancelInitialUploads() }
                     .buttonStyle(.borderedProminent)
             } else if filesToUpload.isEmpty {
-                Button("Done") { close() }
+                Button("Done") { returnToLibrary() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(creation.blocksDismissal)
+                    .disabled(blocksFilesPageDismissal)
             } else {
                 Button("Upload") { uploadSelectedFiles() }
                     .keyboardShortcut(.defaultAction)
@@ -633,21 +531,6 @@ struct NewProjectSheet: View {
     }
 
     // MARK: - Helpers
-
-    private func createdMessage(_ stage: ProjectCreationCoordinator.Stage) -> String {
-        switch stage {
-        case .refreshing:
-            return "Refreshing your complete Samply Library…"
-        case .opening:
-            return "Opening the project…"
-        case .opened:
-            return "Project opened in Tunes."
-        case .delayed:
-            return "The project has not appeared in your Library yet. Samply may still be updating history."
-        case .refreshFailed(let message), .openFailed(let message):
-            return message
-        }
-    }
 
     private func initialFileStatus(_ file: ProjectCreationCoordinator.InitialFile) -> String {
         switch file.status {
@@ -733,6 +616,7 @@ struct NewProjectSheet: View {
         guard !filesToUpload.isEmpty else { return }
         if creation.addFiles(filesToUpload.map(\.url)) {
             filesToUpload = []
+            returnToLibrary()
         }
     }
 
@@ -787,7 +671,13 @@ struct NewProjectSheet: View {
         }
     }
 
-    private func close() {
+    private func returnToLibrary() {
+        onReturnToLibrary()
+        Task { await backend.refresh(.library) }
+        dismiss()
+    }
+
+    private func closeDetails() {
         if creation.canFinishCreatedProject {
             creation.reset()
         } else {

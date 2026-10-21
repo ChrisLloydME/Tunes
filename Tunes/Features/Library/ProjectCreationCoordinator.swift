@@ -174,10 +174,8 @@ final class ProjectCreationCoordinator {
     }
 
     var canFinishCreatedProject: Bool {
-        guard case .created(_, .opened) = state,
+        guard case .created = state,
               !isUploadingInitialFiles, !artworkState.isBusy else { return false }
-        if case .uncertain = artworkState { return false }
-        if case .failed = artworkState { return false }
         return !initialFiles.contains {
             switch $0.status {
             case .failed, .uncertain, .cancelled: return true
@@ -260,7 +258,7 @@ final class ProjectCreationCoordinator {
                                                    accountID: accountID)
                 }
             }
-            await refreshAndOpen(created, ticket: ticket)
+            await refreshAfterCreation(created, ticket: ticket)
         } catch {
             guard isCurrent(ticket, accountID: accountID) else { return }
             if Self.isAmbiguous(error) {
@@ -558,7 +556,9 @@ final class ProjectCreationCoordinator {
         state = .idle
     }
 
-    private func refreshAndOpen(_ created: CreatedProject, ticket: UUID) async {
+    /// Creation stays on the Library screen. Refresh its complete history in
+    /// the background and retain the confirmed project without navigating to it.
+    private func refreshAfterCreation(_ created: CreatedProject, ticket: UUID) async {
         do {
             guard let snapshot = try await completeLibrary(ticket: ticket,
                                                            accountID: created.accountID) else { return }
@@ -566,21 +566,7 @@ final class ProjectCreationCoordinator {
             if let item = Self.item(for: current.project.id, in: snapshot.library) {
                 var updated = current
                 updated.libraryItem = item
-                state = .created(updated, .opening)
-                guard let destination = openDestination(for: updated) else {
-                    updateStage(.openFailed("Samply did not provide a player link for this project. Refresh Library and open it there."))
-                    return
-                }
-                do {
-                    try await openDestination(destination, ticket: ticket,
-                                              accountID: created.accountID)
-                } catch is CancellationError {
-                    guard isCurrent(ticket, accountID: created.accountID) else { return }
-                    updateStage(.openFailed(Self.interruptedOpenMessage))
-                } catch {
-                    guard isCurrent(ticket, accountID: created.accountID) else { return }
-                    updateStage(.openFailed(Self.openFailureMessage(error)))
-                }
+                state = .created(updated, .opened)
             } else {
                 updateStage(.delayed)
             }

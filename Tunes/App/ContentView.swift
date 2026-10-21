@@ -125,7 +125,9 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showConnection) { ConnectionView(backend: backend) }
-        .sheet(isPresented: $showNewProject) { NewProjectSheet(backend: backend) }
+        .sheet(isPresented: $showNewProject) {
+            NewProjectSheet(backend: backend) { showsProject = false }
+        }
         .focusedSceneValue(\.samplyPage, currentPage)
         .frame(minWidth: 860, minHeight: 560)
         .task { backend.start() }

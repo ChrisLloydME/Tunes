@@ -44,12 +44,12 @@ struct ProjectCreationTests {
         #expect(api.names == ["First"])
     }
 
-    @Test func completeLibraryIsRefreshedAndTheCreatedProjectIsOpened() async {
+    @Test func completeLibraryIsRefreshedWithoutLeavingTheLibrary() async {
         let item = libraryItem()
         let web = StubCreationWeb(
             libraryResponses: [.success(snapshot(library: [item]))],
             browseResponse: { routeID, _ in
-                #expect(routeID == "share-1")
+                Issue.record("Creation must not navigate to the project")
                 return snapshot(routeID: routeID)
             }
         )
@@ -63,15 +63,12 @@ struct ProjectCreationTests {
         await coordinator.create(name: "  Album  ")
 
         #expect(api.names == ["Album"])
-        #expect(web.calls.map(\.command) == ["refreshPage", "browse"])
+        #expect(web.calls.map(\.command) == ["refreshPage"])
         #expect(web.calls[0].arguments["page"] as? String == "library")
-        #expect(web.calls[1].arguments["routeID"] as? String == "share-1")
         #expect(refreshed == [item])
         #expect(coordinator.createdStage == .opened)
         #expect(coordinator.createdProject?.libraryItem == item)
-        #expect(opened?.0.canUpload == true)
-        #expect(opened?.0.projectID == "project-1")
-        #expect(opened?.1.routeID == "share-1")
+        #expect(opened == nil)
     }
 
     @Test func documentedPlayerURLKeepsTheProjectOpenableBeforeLibraryPropagation() async {
@@ -358,13 +355,16 @@ struct ProjectCreationTests {
         #expect(api.names.count == 1)
     }
 
-    @Test func initialUploadsStartBeforeNavigationAndSurviveItsFailure() async throws {
+    @Test func initialUploadsDoNotRequireProjectNavigation() async throws {
         let file = try temporaryFile("Initial Mix.wav")
         defer { try? FileManager.default.removeItem(at: file) }
         let item = libraryItem()
         let web = StubCreationWeb(
             libraryResponses: [.success(snapshot(library: [item]))],
-            browseResponse: { _, _ in throw SamplyError.invalidResponse }
+            browseResponse: { _, _ in
+                Issue.record("Project creation must not navigate")
+                throw SamplyError.invalidResponse
+            }
         )
         let api = StubProjectAPI(result: .success(project()))
         let uploader = StubFileUploader()
@@ -377,10 +377,8 @@ struct ProjectCreationTests {
         #expect(coordinator.initialFiles.count == 1)
         #expect(coordinator.initialFiles[0].status == .uploaded(boxID: "box-1"))
         #expect(api.names.count == 1)
-        guard case .created(_, .openFailed) = coordinator.state else {
-            Issue.record("Expected navigation failure after uploads started")
-            return
-        }
+        #expect(web.calls.map(\.command) == ["refreshPage"])
+        #expect(coordinator.createdStage == .opened)
     }
 
     @Test func initialUploadsAreOrderedAndPreservePartialSuccess() async throws {
