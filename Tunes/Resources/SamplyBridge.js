@@ -139,14 +139,10 @@
             currentTime === engine.currentTime) return;
         if (typeof engine?.opts?.ontimeupdate === 'function') engine.opts.ontimeupdate();
     }
-    function snapshot() {
-        const g = globals(), auth = account(), lib = store('library');
-        // Retain the explicit server read until the live Library subscription publishes
-        // a new array, so the next background poll cannot restore its older cached list.
-        if (refreshedLibrary && (refreshedLibrary.uid !== auth?.uid || refreshedLibrary.source !== lib?.items))
-            refreshedLibrary = null;
-        if (auth) syncPlaybackClock();
-        const player = store('player'), boxes = store('boxes'), audio = store('audio-module');
+    function routeID(g) {
+        return text(g.$router.currentRoute.value.params.shareid);
+    }
+    function currentCapabilities(g, lib, boxes, player, audio) {
         const capabilities = [];
         if (lib && Array.isArray(lib.items)) capabilities.push('library');
         if (boxes && typeof boxes.getBox === 'function') capabilities.push('boxes');
@@ -156,34 +152,61 @@
         // and status reads keep working from the live stores.
         if (pinnedDataBuild()) capabilities.push('refresh', 'ownership');
         if (maySeeVersions()) capabilities.push('versions');
-        const boxesReady = !!auth && !!player?.playerDocumentData && player.playerBoxesLoading === false &&
+        return capabilities;
+    }
+    function boxesAreReady(g, player, boxes) {
+        return !!player?.playerDocumentData && player.playerBoxesLoading === false &&
             boxes?.loadingBoxes === false &&
             player?.shareid === g.$router.currentRoute.value.params.shareid &&
             (boxes.currentLevelId || null) === (g.$router.currentRoute.value.query?.group || null) &&
             Array.isArray(boxes.boxViewModelsCurrentLevel);
-        let playback = null;
-        if (audio && auth) {
-            playback = {
-                fileID: text(audio.audioboxid), title: text(audio.metadata?.title),
-                artist: text(audio.metadata?.artist), album: text(audio.metadata?.album),
-                artwork: image(audio.artwork), playing: audio.playing === true,
-                loading: audio.loading === true, buffering: audio.buffering === true,
-                position: Math.max(0, finite(audio.currentTime)), duration: Math.max(0, finite(audio.duration)),
-                volume: finite(audio.volume, 1), quality: text(audio.qualityLoaded),
-                error: audio.error ? 'Samply web player reported a playback error.' : undefined,
-                canGoNext: (audio.queue?.length || 0) > 1,
-                canGoPrevious: (audio.queue?.length || 0) > 1
-            };
-        }
+    }
+    function playbackState(audio, auth) {
+        if (!audio || !auth) return null;
+        return {
+            fileID: text(audio.audioboxid), title: text(audio.metadata?.title),
+            artist: text(audio.metadata?.artist), album: text(audio.metadata?.album),
+            artwork: image(audio.artwork), playing: audio.playing === true,
+            loading: audio.loading === true, buffering: audio.buffering === true,
+            position: Math.max(0, finite(audio.currentTime)), duration: Math.max(0, finite(audio.duration)),
+            volume: finite(audio.volume, 1), quality: text(audio.qualityLoaded),
+            error: audio.error ? 'Samply web player reported a playback error.' : undefined,
+            canGoNext: (audio.queue?.length || 0) > 1,
+            canGoPrevious: (audio.queue?.length || 0) > 1
+        };
+    }
+    // No Library or box arrays are mapped or serialized here. On-demand commands
+    // still return full snapshots.
+    function runtimeSnapshot() {
+        const g = globals(), auth = account();
+        if (auth) syncPlaybackClock();
+        const player = store('player'), boxes = store('boxes'), audio = store('audio-module');
+        const lib = store('library');
         return {
             version: 1, account: auth, authentication: authenticationState(auth),
+            routeID: routeID(g),
+            projectID: text(player?.parentProjectID), levelID: text(boxes?.currentLevelId),
+            boxesReady: !!auth && boxesAreReady(g, player, boxes),
+            playback: playbackState(audio, auth),
+            capabilities: currentCapabilities(g, lib, boxes, player, audio)
+        };
+    }
+    function snapshot() {
+        const g = globals(), auth = account(), lib = store('library');
+        // Retain the explicit server read until the live Library subscription publishes
+        // a new array, so the next background poll cannot restore its older cached list.
+        if (refreshedLibrary && (refreshedLibrary.uid !== auth?.uid || refreshedLibrary.source !== lib?.items))
+            refreshedLibrary = null;
+        const runtime = runtimeSnapshot();
+        const boxes = store('boxes');
+        return {
+            version: runtime.version, account: runtime.account, authentication: runtime.authentication,
             libraryReady: !!auth && (!!refreshedLibrary || lib?.loading === false),
             library: refreshedLibrary?.items || (auth && Array.isArray(lib?.items) ? libraryView(lib.items, auth, lib) : []),
-            routeID: text(g.$router.currentRoute.value.params.shareid),
-            projectID: text(player?.parentProjectID), levelID: text(boxes?.currentLevelId),
-            boxesReady,
-            boxes: boxesReady ? (boxes.boxViewModelsCurrentLevel || []).map(vm => boxView(vm, boxes)) : [],
-            playback, capabilities
+            routeID: runtime.routeID, projectID: runtime.projectID, levelID: runtime.levelID,
+            boxesReady: runtime.boxesReady,
+            boxes: runtime.boxesReady ? (boxes.boxViewModelsCurrentLevel || []).map(vm => boxView(vm, boxes)) : [],
+            playback: runtime.playback, capabilities: runtime.capabilities
         };
     }
     function pinnedDataBuild() {
@@ -365,6 +388,7 @@
         // Native timeout notification. This does not cancel already-started page
         // work; it only prevents that request's late result from being applied.
         if (name === 'cancel') { markSuperseded(args.requestID); return true; }
+        if (name === 'runtimeSnapshot') return runtimeSnapshot();
         if (name === 'snapshot') return snapshot();
         if (name === 'refreshPage') return await refreshPage(args);
         if (name === 'navigatePage') {

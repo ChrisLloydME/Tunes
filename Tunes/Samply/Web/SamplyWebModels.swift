@@ -84,11 +84,56 @@ struct WebSnapshot: Codable, Sendable {
     let capabilities: [String]
 }
 
-extension WebSnapshot {
+/// The 700 ms polling payload. It deliberately has no Library or box arrays so
+/// its cost does not grow with collection size. On-demand commands still return
+/// complete `WebSnapshot` values.
+struct WebRuntimeSnapshot: Codable, Sendable {
+    let version: Int
+    var account: WebSnapshot.Account?
+    var authentication: WebAuthenticationState?
+    var authenticationState: WebAuthenticationState {
+        if account != nil { return .signedIn }
+        return authentication == .signedOut ? .signedOut : .checking
+    }
+    var routeID: String?
+    var projectID: String?
+    var levelID: String?
+    let boxesReady: Bool
+    var playback: WebPlayback?
+    let capabilities: [String]
+
+    init(_ snapshot: WebSnapshot) {
+        version = snapshot.version
+        account = snapshot.account
+        authentication = snapshot.authentication
+        routeID = snapshot.routeID
+        projectID = snapshot.projectID
+        levelID = snapshot.levelID
+        boxesReady = snapshot.boxesReady
+        playback = snapshot.playback
+        capabilities = snapshot.capabilities
+    }
+
     func supports(_ capability: SamplyCapability) -> Bool {
         capabilities.contains(capability.rawValue)
     }
 
+    func validateVersion() throws {
+        guard version == 1 else { throw SamplyBridgeError.contractMismatch }
+    }
+
+    func hasLoadedBoxes(routeID: String, groupID: String?,
+                        expectedProjectID: String?) -> Bool {
+        authenticationState == .signedIn && boxesReady &&
+            self.routeID == routeID && levelID == groupID &&
+            (expectedProjectID == nil || projectID == expectedProjectID)
+    }
+}
+
+extension WebSnapshot {
+    func supports(_ capability: SamplyCapability) -> Bool {
+        capabilities.contains(capability.rawValue)
+    }
     /// The adapter protocol is versioned; an unknown version must not drive
     /// native state merely because it decoded into the current shape.
     func validateVersion() throws {

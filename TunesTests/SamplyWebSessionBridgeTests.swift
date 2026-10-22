@@ -322,3 +322,72 @@ struct SamplyBridgeProtocolTests {
         }
     }
 }
+
+@MainActor
+struct SamplyRuntimeSessionTests {
+    private let fullJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[],"routeID":"share-1","projectID":"project-1",\
+    "boxesReady":false,"boxes":[],"capabilities":["library","boxes","playback","browse"]}}
+    """
+
+    private let runtimeJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "routeID":"share-1","projectID":"project-1","boxesReady":true,\
+    "playback":{"fileID":"track-a","title":"Track","playing":true,"loading":false,\
+    "buffering":false,"position":12,"duration":120,"volume":1,\
+    "canGoNext":false,"canGoPrevious":false},\
+    "capabilities":["library","boxes","playback","browse"]}}
+    """
+
+    private let otherAccountRuntimeJSON = """
+    {"payload":{"version":1,"account":{"uid":"other-account"},"authentication":"signedIn",\
+    "routeID":"share-2","projectID":"project-2","boxesReady":false,\
+    "playback":{"fileID":"track-b","title":"Other","playing":false,"loading":false,\
+    "buffering":false,"position":0,"duration":60,"volume":1,\
+    "canGoNext":false,"canGoPrevious":false},\
+    "capabilities":["library","boxes","playback"]}}
+    """
+
+    private func waitForInvocation(_ transport: ControllableBridgeTransport,
+                                   count: Int = 1) async {
+        for _ in 0..<500 {
+            if transport.count >= count { return }
+            await Task.yield()
+        }
+        Issue.record("bridge transport was not invoked")
+    }
+
+    @Test func runtimeReadSamplesIdentityAndPlaybackWithoutAFullSnapshot() async {
+        let transport = ControllableBridgeTransport()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport)
+        let task = Task { await session.refreshRuntime() }
+        await waitForInvocation(transport)
+        transport.complete(0, with: runtimeJSON)
+        let succeeded = await task.value
+        #expect(succeeded)
+        #expect(session.runtimeSnapshot?.playback?.fileID == "track-a")
+        #expect(session.account?.uid == "fixture-account")
+        #expect(session.snapshot == nil)
+        #expect(session.authenticationState == .signedIn)
+    }
+
+    @Test func aChangedRuntimeIdentityDropsFullContentFromTheOldAccount() async {
+        let transport = ControllableBridgeTransport()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport)
+        let fullTask = Task { await session.refresh() }
+        await waitForInvocation(transport)
+        transport.complete(0, with: fullJSON)
+        #expect(await fullTask.value)
+        #expect(session.snapshot != nil)
+        #expect(session.account?.uid == "fixture-account")
+
+        let runtimeTask = Task { await session.refreshRuntime() }
+        await waitForInvocation(transport, count: 2)
+        transport.complete(1, with: otherAccountRuntimeJSON)
+        #expect(await runtimeTask.value)
+        #expect(session.snapshot == nil)
+        #expect(session.runtimeSnapshot?.account?.uid == "other-account")
+        #expect(session.account?.uid == "other-account")
+    }
+}

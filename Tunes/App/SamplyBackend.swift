@@ -48,6 +48,8 @@ final class SamplyBackend {
     @ObservationIgnored private var sessionStartedAt: TimeInterval?
     @ObservationIgnored private var hasRecordedSessionRestoration = false
     @ObservationIgnored private var hasRecordedLibraryAcceptance = false
+    @ObservationIgnored private var pollSchedule = SamplyPollSchedule()
+    @ObservationIgnored private var lastRuntimeIdentity: RuntimeIdentity?
 
     init(tokens: (any TokenStore)? = nil, diagnostics: SamplyDiagnostics? = nil,
          clock: (any MonotonicClock)? = nil) {
@@ -66,7 +68,9 @@ final class SamplyBackend {
         projectCreation = ProjectCreationCoordinator(api: api, web: web, uploader: uploader,
                                                      credentials: credentials)
         projectCreation.onLibraryRefreshed = { [weak self] items in
-            self?.content.acceptLibrary(items)
+            guard let self else { return }
+            self.content.acceptLibrary(items)
+            self.noteFullContentAccepted()
         }
         projectCreation.onProjectOpened = { [weak self] item, snapshot in
             self?.acceptCreatedProject(item, snapshot)
@@ -76,7 +80,7 @@ final class SamplyBackend {
         }
     }
 
-    var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
+    var isConnected: Bool { web.account != nil && !web.isSigningOut }
     var isCheckingSession: Bool { web.authenticationState == .checking }
     var libraryReady: Bool { web.snapshot?.libraryReady == true }
     var hasToken: Bool { credentials.hasStoredToken }
@@ -94,30 +98,96 @@ final class SamplyBackend {
         monitor = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                let refreshed = await self.web.refresh()
-                if refreshed, !self.web.isSigningOut { self.acceptSnapshot() }
-                try? await Task.sleep(for: self.web.pollInterval)
+                await self.poll()
+                let delay = self.pollSchedule.nextPollDelay(
+                    at: self.clock.now(), interactive: self.isInteractive)
+                do { try await Task.sleep(for: delay) }
+                catch { return }
             }
         }
     }
 
+    /// True while a user action owns the bridge. Background full reads wait; the
+    /// runtime clock continues so playback stays current.
+    private var isInteractive: Bool {
+        isBrowsing || isRefreshing || isPlayingSelection || isOpeningSamply
+    }
+
+    /// The single polling owner: one runtime sample per tick, plus a complete
+    /// content read when it is due or invalidated.
+    private func poll() async {
+        if await web.refreshRuntime(), !web.isSigningOut {
+            acceptRuntimeSnapshot()
+        }
+        guard !isInteractive, pollSchedule.shouldReadFullContent(at: clock.now()) else { return }
+        let generation = pollSchedule.invalidationGeneration
+        let refreshed = await web.refresh()
+        if refreshed, !web.isSigningOut {
+            acceptSnapshot()
+            pollSchedule.recordFullRead(at: clock.now(), succeeded: true,
+                                        generation: generation)
+        } else {
+            pollSchedule.recordFullRead(at: clock.now(), succeeded: false,
+                                        generation: generation)
+        }
+    }
+
+    @discardableResult
+    private func acceptIdentity(_ account: WebSnapshot.Account?) -> Bool {
+        let newAccount = account?.uid
+        guard !hasResolvedTokenAccount || newAccount != accountID else { return false }
+        sessionGeneration &+= 1
+        projectCreation.invalidate()
+        invalidateSelection()
+        content.acceptLibrary([])
+        playback.clear()
+        uploader.reset()
+        // Restore and revalidate only after identity resolves; never reuse
+        // account A's PAT for B, and never treat the stored account ID as proof.
+        credentials.activate(accountID: newAccount, generation: sessionGeneration)
+        accountID = newAccount
+        hasResolvedTokenAccount = true
+        return true
+    }
+
+    /// Applies identity, route/readiness, capabilities, and playback without
+    /// substituting an empty Library or box array. Full content arrives through
+    /// `acceptSnapshot` when the schedule says it is due.
+    private func acceptRuntimeSnapshot() {
+        guard let runtime = web.runtimeSnapshot,
+              runtime.authenticationState != .checking else { return }
+        let identityChanged = acceptIdentity(runtime.account)
+        guard runtime.account != nil else { return }
+
+        let identity = RuntimeIdentity(routeID: runtime.routeID,
+                                       projectID: runtime.projectID,
+                                       levelID: runtime.levelID,
+                                       boxesReady: runtime.boxesReady)
+        if identity != lastRuntimeIdentity {
+            lastRuntimeIdentity = identity
+            pollSchedule.markFullContentNeeded()
+        } else if identityChanged || web.snapshot == nil {
+            pollSchedule.markFullContentNeeded()
+        }
+
+        // Box evidence is valid only when the sampled route is the accepted
+        // displayed route. Otherwise a new track stays unresolved until the
+        // next full snapshot rather than borrowing the displayed album.
+        let trustedBoxes: [WebBox]
+        if runtime.routeID == selectedItem?.routeID, albumLoadState == .loaded {
+            trustedBoxes = boxes
+        } else {
+            trustedBoxes = []
+        }
+        playback.applyRuntime(runtime.playback, routeID: runtime.routeID,
+                              trustedLibrary: library, trustedBoxes: trustedBoxes)
+    }
+
     private func acceptSnapshot() {
         guard let state = web.snapshot, state.authenticationState != .checking else { return }
-        let newAccount = state.account?.uid
-        if !hasResolvedTokenAccount || newAccount != accountID {
-            sessionGeneration &+= 1
-            projectCreation.invalidate()
-            invalidateSelection()
-            content.acceptLibrary([])
-            playback.clear()
-            uploader.reset()
-            // Restore and revalidate only after identity resolves; never reuse
-            // account A's PAT for B, and never treat the stored account ID as proof.
-            credentials.activate(accountID: newAccount, generation: sessionGeneration)
-            accountID = newAccount
-            hasResolvedTokenAccount = true
-        }
-        guard newAccount != nil else { return }
+        let identityChanged = acceptIdentity(state.account)
+        guard state.account != nil else { return }
+        if identityChanged { pollSchedule.markFullContentNeeded() }
         if !hasRecordedSessionRestoration, let sessionStartedAt {
             record(.sessionRestoration, since: sessionStartedAt)
             hasRecordedSessionRestoration = true
@@ -139,6 +209,14 @@ final class SamplyBackend {
         }
     }
 
+    /// Explicit command results and accepted content reads count as a fresh
+    /// full read for cadence purposes; they must not be repeated immediately by
+    /// the background poll.
+    private func noteFullContentAccepted() {
+        pollSchedule.recordFullRead(at: clock.now(), succeeded: true,
+                                    generation: pollSchedule.invalidationGeneration)
+    }
+
     /// Diagnostics carry only fixed stages and counts; never names, URLs, or IDs.
     private func record(_ stage: SamplyDiagnosticStage, since start: TimeInterval,
                         itemCount: Int = 0, outcome: SamplyDiagnosticOutcome = .success) {
@@ -153,7 +231,10 @@ final class SamplyBackend {
     func recover(_ page: SamplyPage, forcePageRefresh: Bool = false) async {
         // Retry reads only. Never replay play/pause/seek/upload commands or reload the WebView.
         let needsPageRefresh = forcePageRefresh || hasTransientError
-        if await web.refresh() { acceptSnapshot() }
+        if await web.refresh() {
+            acceptSnapshot()
+            noteFullContentAccepted()
+        }
         if needsPageRefresh { await refresh(page) }
     }
 
@@ -204,6 +285,7 @@ final class SamplyBackend {
                                         expectedProjectID: item.projectID) {
                     content.acceptBoxes(state.boxes)
                     albumLoadState = .loaded
+                    noteFullContentAccepted()
                     record(.selection, since: startedAt, itemCount: state.boxes.count)
                 } else {
                     albumLoadState = .failed
@@ -392,7 +474,7 @@ final class SamplyBackend {
     func refresh(_ page: SamplyPage) async {
         guard isConnected, !isRefreshing, !isBrowsing, !isPlayingSelection else { return }
         let generation = selectionGeneration
-        let account = web.snapshot?.account?.uid
+        let account = web.account?.uid
         let startedAt = clock.now()
         isRefreshing = true
         defer { isRefreshing = false }
@@ -400,12 +482,13 @@ final class SamplyBackend {
             let state: WebSnapshot = try await web.call("refreshPage", arguments: page.arguments)
             try Task.checkCancellation()
             try state.validateVersion()
-            guard account == web.snapshot?.account?.uid, state.account?.uid == account,
+            guard account == web.account?.uid, state.account?.uid == account,
                   !web.isSigningOut else { return }
             switch page {
             case .library:
                 guard state.libraryReady else { throw SamplyError.invalidResponse }
                 content.acceptLibrary(state.library)
+                noteFullContentAccepted()
                 record(.serverRefresh, since: startedAt, itemCount: state.library.count)
             case .album(let routeID, let groupID):
                 guard generation == selectionGeneration, let selectedItem,
@@ -416,6 +499,7 @@ final class SamplyBackend {
                 }
                 content.acceptBoxes(state.boxes)
                 albumLoadState = .loaded
+                noteFullContentAccepted()
                 record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
             }
             // Refresh only updates page data. The media engine and native playback stay intact.
@@ -423,7 +507,7 @@ final class SamplyBackend {
             hasTransientError = false
         } catch is CancellationError { }
         catch {
-            if generation == selectionGeneration, account == web.snapshot?.account?.uid {
+            if generation == selectionGeneration, account == web.account?.uid {
                 record(.serverRefresh, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
                 recordFailure(error)
             }
@@ -462,7 +546,7 @@ final class SamplyBackend {
     /// complete Library was already refreshed, so a delayed history entry is not
     /// fabricated into the native grid.
     private func acceptCreatedProject(_ item: LibraryItem, _ snapshot: WebSnapshot) {
-        guard web.snapshot?.account?.uid == snapshot.account?.uid else { return }
+        guard web.account?.uid == snapshot.account?.uid else { return }
         var opened = item
         if let routeID = snapshot.routeID, !routeID.isEmpty { opened.shareID = routeID }
         if let projectID = snapshot.projectID { opened.projectID = projectID }
@@ -472,6 +556,7 @@ final class SamplyBackend {
         content.acceptBoxes(snapshot.boxes)
         albumLoadState = .loaded
         content.replaceLibraryItem(opened)
+        noteFullContentAccepted()
     }
 
     private func invalidateSelection() {
@@ -489,4 +574,12 @@ final class SamplyBackend {
         albumLoadState = .idle
         isPlayingSelection = false
     }
+}
+
+/// Route/level/readiness identity used to invalidate the next full content read.
+private struct RuntimeIdentity: Equatable {
+    let routeID: String?
+    let projectID: String?
+    let levelID: String?
+    let boxesReady: Bool
 }

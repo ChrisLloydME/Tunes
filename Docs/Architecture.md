@@ -87,7 +87,7 @@ The diagram shows the main calls. Connection views also call `SamplyWebSession` 
 
 The main coordinating objects use `@MainActor`; observable state uses Observation. Network and WebKit operations use `async/await`, and the upload delegate delivers progress to the main actor. Samply's media clock is authoritative for playback position; native dragging, hold gestures, and progress presentation must not become the source of truth for media state.
 
-`SamplyBackend.start()` starts one monitoring task: call `web.refresh()`, accept a trusted snapshot, then wait according to bridge health. Normal polling uses 700 milliseconds; the first 10 seconds of read failures use 250 milliseconds. A bridge read error appears only after 5 seconds of continuous failure. Hosted unit tests skip monitoring startup and real Samply navigation.
+`SamplyBackend.start()` starts one polling task. Each tick samples the lightweight `runtimeSnapshot` (identity, route/readiness, capabilities, and playback) and reads a complete content snapshot only when it is invalidated or due. Runtime samples keep the existing roughly 700-millisecond cadence, including while the WebKit window is hidden. A complete read is due at most once every 2.1 seconds; authenticated identity/readiness changes, route or folder transitions, and explicit browse/refresh/creation results invalidate the next read immediately. Interactive commands delay background full reads but not runtime samples. `WebRuntimeSnapshot` never carries Library or box arrays, so playback clock updates do not remap whole collections. A bridge read error appears only after 5 seconds of continuous failure. Hosted unit tests skip monitoring startup and real Samply navigation.
 
 ## Key data flows
 

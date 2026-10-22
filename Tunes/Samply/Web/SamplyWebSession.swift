@@ -8,10 +8,17 @@ import WebKit
 final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     let profile: SamplyProfileCache
     private(set) var snapshot: WebSnapshot?
+    private(set) var runtimeSnapshot: WebRuntimeSnapshot?
     private(set) var connectionError: String?
     private(set) var isSigningOut = false
     private(set) var authenticationState: WebAuthenticationState = .checking
     private(set) var pageBackgroundColor = NSColor.windowBackgroundColor
+
+    /// Identity and capabilities may come from a lightweight runtime sample
+    /// before the next full content read.
+    var account: WebSnapshot.Account? { runtimeSnapshot?.account ?? snapshot?.account }
+    var currentCapabilities: [String] { runtimeSnapshot?.capabilities ?? snapshot?.capabilities ?? [] }
+
     @ObservationIgnored let webView: WKWebView
     @ObservationIgnored private var window: NSWindow?
     @ObservationIgnored private var signInWindow: NSWindow?
@@ -215,10 +222,48 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         self.window = window
     }
 
+    /// Samples identity, route/readiness, capabilities, and playback only.
+    /// The payload is independent of Library and box collection sizes.
+    @discardableResult
+    func refreshRuntime() async -> Bool {
+        let endpointReady = transportOverride != nil ||
+            (webView.url?.host == "samply.app" && webView.url?.scheme == "https")
+        guard !isSigningOut, !webView.isLoading, !isRefreshingSnapshot,
+              endpointReady else { return false }
+        isRefreshingSnapshot = true
+        defer { isRefreshingSnapshot = false }
+        let stamp = generation
+        do {
+            let state: WebRuntimeSnapshot = try await call("runtimeSnapshot")
+            guard generation == stamp else { return false }
+            try state.validateVersion()
+            if runtimeSnapshot?.account?.uid != state.account?.uid {
+                // Full content from another identity is not a valid cache.
+                snapshot = nil
+            }
+            profile.accept(state.account, authentication: state.authenticationState)
+            sessionHistory.accept(state.authenticationState)
+            runtimeSnapshot = state
+            authenticationState = state.authenticationState
+            if state.authenticationState == .signedIn { dismissSignIn() }
+            bridgeHealth.reset()
+            connectionError = nil
+            return true
+        } catch {
+            guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return false }
+            if error is SamplyBridgeError,
+               !bridgeHealth.recordFailure(at: clock.now()) { return false }
+            connectionError = error.localizedDescription
+            return false
+        }
+    }
+
     @discardableResult
     func refresh() async -> Bool {
+        let endpointReady = transportOverride != nil ||
+            (webView.url?.host == "samply.app" && webView.url?.scheme == "https")
         guard !isSigningOut, !webView.isLoading, !isRefreshingSnapshot,
-              webView.url?.host == "samply.app", webView.url?.scheme == "https" else { return false }
+              endpointReady else { return false }
         isRefreshingSnapshot = true
         defer { isRefreshingSnapshot = false }
         let stamp = generation
@@ -230,6 +275,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             profile.accept(state.account, authentication: state.authenticationState)
             sessionHistory.accept(state.authenticationState)
             snapshot = state
+            runtimeSnapshot = WebRuntimeSnapshot(state)
             authenticationState = state.authenticationState
             if state.authenticationState == .signedIn { dismissSignIn() }
             bridgeHealth.reset()
@@ -252,7 +298,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         }
         if let feature = Self.requiredFeature(for: command) {
             // Missing feature capabilities are terminal for that feature only.
-            guard let current = snapshot else { throw SamplyBridgeError.notReady }
+            guard let current = runtimeSnapshot else { throw SamplyBridgeError.notReady }
             guard current.supports(feature.capability) else { throw feature.missingError }
         }
         let stamp = generation
@@ -437,6 +483,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         beginNewDocumentGeneration()
         authenticationState = .checking
         snapshot = nil
+        runtimeSnapshot = nil
         webView.stopLoading()
         await webView.pauseAllMediaPlayback()
         for popup in popupWindows { popup.close() }
@@ -474,6 +521,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard webView === self.webView else { return }
         beginNewDocumentGeneration()
         snapshot = nil
+        runtimeSnapshot = nil
         authenticationState = .checking
         connectionError = "The Samply web process stopped. Reloading…"
         webView.reload()

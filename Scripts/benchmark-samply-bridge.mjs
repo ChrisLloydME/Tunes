@@ -81,3 +81,33 @@ for (const scenario of scenarios) {
         `${mm(result.construction.median)} | ${mm(result.construction.p95)} | ` +
         `${mm(result.serialization.median)} | ${mm(result.serialization.p95)} |`);
 }
+
+async function measureRuntime({libraryCount, boxCount}) {
+    const f = fixture({libraryCount, boxCount});
+    for (let index = 0; index < WARMUPS; index += 1) {
+        await f.bridge.command('runtimeSnapshot');
+    }
+    const samples = [];
+    let runtime = null;
+    for (let index = 0; index < MEASURED; index += 1) {
+        const started = performance.now();
+        runtime = await f.bridge.command('runtimeSnapshot');
+        samples.push(performance.now() - started);
+    }
+    if ('library' in runtime || 'boxes' in runtime) {
+        throw new Error('runtime payload unexpectedly contains collections');
+    }
+    const summary = summarize(samples);
+    return {libraryCount, boxCount, bytes: Buffer.byteLength(JSON.stringify(runtime)), summary};
+}
+
+console.log('');
+console.log('Runtime snapshot baseline (no Library or box arrays):');
+console.log('| Library | Boxes | Payload | Median ms | p95 ms |');
+console.log('| --- | --- | --- | --- | --- |');
+for (const scenario of [{libraryCount: 10, boxCount: 0}, {libraryCount: 1000, boxCount: 0},
+    {libraryCount: 10, boxCount: 1000}]) {
+    const result = await measureRuntime(scenario);
+    console.log(`| ${result.libraryCount} | ${result.boxCount} | ${kb(result.bytes)} KiB | ` +
+        `${mm(result.summary.median)} | ${mm(result.summary.p95)} |`);
+}

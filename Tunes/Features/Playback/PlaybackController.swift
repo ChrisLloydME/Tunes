@@ -100,6 +100,30 @@ final class PlaybackController {
         apply(snapshot.playback, libraryItem: resolvedItem)
     }
 
+    /// Applies a lightweight runtime sample. Box evidence is supplied only when
+    /// the runtime route matches the accepted displayed route, so a track is
+    /// never bound to an unrelated album merely because that album is selected.
+    func applyRuntime(_ playback: WebPlayback?, routeID: String?,
+                      trustedLibrary: [LibraryItem], trustedBoxes: [WebBox]) {
+        if let current = libraryItem,
+           let updated = trustedLibrary.first(where: { $0.id == current.id }),
+           updated != current {
+            libraryItem = updated
+            libraryItemAssignmentCount &+= 1
+        }
+        var resolvedItem: LibraryItem?
+        if libraryItem == nil || playback?.fileID != libraryItemFileID,
+           let fileID = playback?.fileID,
+           trustedBoxes.contains(where: {
+               $0.id == fileID || $0.activeID == fileID || $0.childIDs.contains(fileID)
+           }),
+           let routeID,
+           let match = trustedLibrary.first(where: { $0.routeID == routeID }) {
+            resolvedItem = match
+        }
+        apply(playback, libraryItem: resolvedItem)
+    }
+
     func clear() {
         if state != .empty { state = .empty }
         if libraryItem != nil { libraryItem = nil }

@@ -564,3 +564,45 @@ test('cancelling a request does not undo audio that already started', async () =
     const snapshot = await f.bridge.command('snapshot');
     assert.equal(snapshot.playback.playing, true);
 });
+
+test('runtime snapshots omit collections and do not grow with Library or box counts', async () => {
+    const small = fixture({libraryCount: 10, boxCount: 10});
+    const large = fixture({libraryCount: 1000, boxCount: 1000});
+    const smallRuntime = await small.bridge.command('runtimeSnapshot');
+    const largeRuntime = await large.bridge.command('runtimeSnapshot');
+    for (const field of ['library', 'libraryReady', 'boxes']) {
+        assert.equal(field in smallRuntime, false);
+    }
+    assert.equal(smallRuntime.account.uid, 'user-a');
+    assert.equal(smallRuntime.routeID, 'share-1');
+    assert.equal(smallRuntime.playback.title, 'Mix');
+    assert.ok(smallRuntime.capabilities.includes('playback'));
+    assert.equal(JSON.stringify(largeRuntime), JSON.stringify(smallRuntime));
+    assert.equal(small.calls.some(call => call[0] === 'serverRead' || call[0] === 'sharedRead'), false);
+    assert.equal(large.calls.some(call => call[0] === 'serverRead' || call[0] === 'sharedRead'), false);
+});
+
+test('full snapshots reflect in-place Library mutations rather than only replacement', async () => {
+    const f = fixture();
+    const source = f.library.items;
+    source[0].name = 'Renamed In Place';
+    source[1].artwork = {small: {src: 'https://example.test/updated-shared.png'}};
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(f.library.items, source);
+    assert.equal(snapshot.library[0].name, 'Renamed In Place');
+    assert.equal(snapshot.library[1].artwork, 'https://example.test/updated-shared.png');
+});
+
+test('runtime sampling preserves refreshed Library precedence until the live array changes', async () => {
+    const f = fixture();
+    f.server.library = [serverDocument('server-item', {projectid: 'project-s', playerid: 'player-s',
+        shareid: 'share-s', snippet: {name: 'Server Library', owner: 'user-a'}})];
+    const refreshed = await f.bridge.command('refreshPage', {page: 'library'});
+    const runtime = await f.bridge.command('runtimeSnapshot');
+    assert.equal('library' in runtime, false);
+    const afterRuntime = await f.bridge.command('snapshot');
+    assert.deepEqual(plain(afterRuntime.library), plain(refreshed.library));
+    f.library.items = [{id: 'live-change', name: 'Later live change'}];
+    const afterLiveChange = await f.bridge.command('snapshot');
+    assert.equal(afterLiveChange.library[0].name, 'Later live change');
+});
