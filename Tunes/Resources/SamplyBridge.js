@@ -9,6 +9,9 @@
     if (window.__tunesSamply?.version === 1) return;
     let operation = 0;
     let refreshedLibrary = null;
+    // Opaque request IDs supplied by Tunes. A native timeout supersedes the ID
+    // so a result that arrives later is dropped instead of applied.
+    const supersededRequests = new Set();
     const finite = (v, fallback = 0) => typeof v === 'number' && Number.isFinite(v) ? v : fallback;
     const text = v => typeof v === 'string' ? v : undefined;
     function globals() {
@@ -22,8 +25,11 @@
     const store = id => globals().$pinia._s.get(id);
     function requireStore(id, methods = []) {
         const s = store(id);
-        if (!s || methods.some(m => typeof s[m] !== 'function'))
-            throw operationError(`Samply store contract changed: ${id}. Open the web window to continue.`);
+        // A missing store during initial page setup is transient; a store that
+        // exists but no longer exposes the inspected methods is a contract change.
+        if (!s) throw initializationError(`Samply store is not initialized: ${id}.`);
+        if (methods.some(m => typeof s[m] !== 'function'))
+            throw contractError(`Samply store contract changed: ${id}. Open the web window to continue.`);
         return s;
     }
     function operationError(message) {
@@ -35,6 +41,38 @@
         const error = new Error(message);
         error.code = 'TUNES_NOT_READY';
         return error;
+    }
+    function contractError(message) {
+        const error = new Error(message);
+        error.code = 'TUNES_CONTRACT';
+        return error;
+    }
+    function accessDeniedError(message) {
+        const error = new Error(message);
+        error.code = 'TUNES_ACCESS_DENIED';
+        return error;
+    }
+    function supersededError() {
+        const error = new Error('Operation superseded.');
+        error.code = 'TUNES_SUPERSEDED';
+        return error;
+    }
+    function timeoutError(message) {
+        const error = new Error(message);
+        error.code = 'TUNES_TIMEOUT';
+        return error;
+    }
+    function markSuperseded(requestID) {
+        if (!Number.isInteger(requestID)) return;
+        supersededRequests.add(requestID);
+        if (supersededRequests.size > 64)
+            supersededRequests.delete(supersededRequests.values().next().value);
+    }
+    function requestActive(args) {
+        return args?.requestID === undefined || !supersededRequests.has(args.requestID);
+    }
+    function assertRequestActive(args) {
+        if (!requestActive(args)) throw supersededError();
     }
     const image = artwork => text(artwork) || text(artwork?.small?.src) || text(artwork?.medium?.src);
     function libraryView(items, auth, lib) {
@@ -62,17 +100,17 @@
         return 'checking';
     }
     function assertAccount() {
-        if (!account()) throw operationError('Sign in to Samply in the web window first.');
+        if (!account()) throw accessDeniedError('Sign in to Samply in the web window first.');
     }
-    async function waitFor(test, expectedOperation) {
+    async function waitFor(test, expectedOperation, args) {
         const deadline = Date.now() + 20000;
         while (Date.now() < deadline) {
-            if (operation !== expectedOperation) throw operationError('Operation superseded.');
+            if (!requestActive(args) || operation !== expectedOperation) throw supersededError();
             const value = test();
             if (value) return value;
             await new Promise(resolve => setTimeout(resolve, 100));
         }
-        throw operationError('Samply did not become ready. Check sign-in, permissions, or processing in the web window.');
+        throw timeoutError('Samply did not become ready. Check sign-in, permissions, or processing in the web window.');
     }
     function maySeeVersions() {
         const p = store('player');
@@ -113,6 +151,11 @@
         if (lib && Array.isArray(lib.items)) capabilities.push('library');
         if (boxes && typeof boxes.getBox === 'function') capabilities.push('boxes');
         if (audio && ['play', 'pause', 'seek', 'setVolume', 'loadBox'].every(k => typeof audio[k] === 'function')) capabilities.push('playback');
+        if (g.$router && player && boxes && typeof boxes.getBox === 'function') capabilities.push('browse');
+        // A changed data-export build disables refresh/ownership only. Playback
+        // and status reads keep working from the live stores.
+        if (pinnedDataBuild()) capabilities.push('refresh', 'ownership');
+        if (maySeeVersions()) capabilities.push('versions');
         const boxesReady = !!auth && !!player?.playerDocumentData && player.playerBoxesLoading === false &&
             boxes?.loadingBoxes === false &&
             player?.shareid === g.$router.currentRoute.value.params.shareid &&
@@ -143,24 +186,34 @@
             playback, capabilities
         };
     }
-    async function dataAPI() {
+    function pinnedDataBuild() {
         // These are the data-only exports used by this inspected Samply build.
-        // Reuse its initialized client and authorization; never access auth SDKs or credentials.
+        // Never scan, guess, or import another asset as a fallback.
+        const src = document.querySelector('script[type="module"][src]')?.src;
+        if (!src) return null;
+        try {
+            const url = new URL(src, location.origin);
+            if (url.origin !== location.origin || url.pathname !== '/assets/index.1817c5c9.js') return null;
+            return url;
+        } catch {
+            return null;
+        }
+    }
+    async function dataAPI() {
         const src = document.querySelector('script[type="module"][src]')?.src;
         if (!src) throw initializationError('Samply data adapter unavailable.');
-        const moduleURL = new URL(src, location.origin);
-        if (moduleURL.origin !== location.origin || moduleURL.pathname !== '/assets/index.1817c5c9.js')
-            throw operationError('Samply data adapter build changed.');
-        const api = await import(moduleURL.href);
+        const moduleURL = pinnedDataBuild();
+        if (!moduleURL) throw contractError('Samply data adapter build changed.');
+        const api = await withDeadline(import(moduleURL.href));
         if (!['a9', 'a6', 'a3', 'a5', 'dZ', 'aJ', 'at'].every(k => typeof api[k] === 'function') || !api.a7)
-            throw operationError('Samply data adapter contract changed.');
+            throw contractError('Samply data adapter contract changed.');
         return api;
     }
     async function withDeadline(promise) {
         let timer;
         try {
             return await Promise.race([promise, new Promise((_, reject) => {
-                timer = setTimeout(() => reject(new Error('Samply data refresh timed out.')), 20000);
+                timer = setTimeout(() => reject(timeoutError('Samply data refresh timed out.')), 20000);
             })]);
         } finally { clearTimeout(timer); }
     }
@@ -172,16 +225,19 @@
     }
     async function refreshPage(args) {
         assertAccount();
+        assertRequestActive(args);
         pageRoute(args); // Validate the target without navigating or reloading the media document.
         const uid = account().uid;
         const ticket = operation;
         const api = await dataAPI();
+        assertRequestActive(args);
         const db = api.a9(), paths = api.a7;
-        const stillCurrent = () => account()?.uid === uid && operation === ticket;
+        const stillCurrent = () => requestActive(args) && account()?.uid === uid && operation === ticket;
         if (args.page === 'library') {
             const query = api.a3(api.a6(db, paths.USERS, uid, paths.HISTORY), api.a5('snippet.archived', '==', false));
             const result = await withDeadline(api.dZ(query)); // getDocsFromServer, never a cached success.
-            if (!stillCurrent()) throw operationError('Operation superseded.');
+            if (!stillCurrent()) throw supersededError();
+            assertRequestActive(args);
             const items = result.docs.map(doc => {
                 const data = doc.data(), snippet = data.snippet;
                 if (!snippet) return null;
@@ -189,6 +245,7 @@
                     playerid: data.playerid, shareid: data.shareid, artist: snippet.artist?.displayName || snippet.creator?.displayName,
                     artwork: snippet.artwork, owner: snippet.owner, archived: snippet.archived};
             }).filter(Boolean);
+            assertRequestActive(args);
             const lib = requireStore('library');
             refreshedLibrary = {uid, source: lib.items, items: libraryView(items, account(), lib)};
             return {...snapshot(), libraryReady: true};
@@ -201,6 +258,7 @@
             throw initializationError('The selected album is not ready.');
         const playerID = player.playerid;
         let documents;
+        assertRequestActive(args);
         if (player.isProjectOwner === true || ['admin', 'editor'].includes(player.projectRole)) {
             documents = (await withDeadline(api.dZ(api.a6(db, paths.PROJECTS, player.parentProjectID, paths.BOXES)))).docs;
         } else {
@@ -210,7 +268,8 @@
             documents = result.boxes.map(box => ({id: box.id,
                 ref: api.aJ(db, paths.PROJECTS, player.parentProjectID, paths.BOXES, box.id), data: () => box.data}));
         }
-        if (!stillCurrent() || !matches() || player.playerid !== playerID) throw operationError('Operation superseded.');
+        if (!stillCurrent() || !matches() || player.playerid !== playerID) throw supersededError();
+        assertRequestActive(args);
         // Update only the same box snapshots consumed by the existing files store.
         // No router navigation, store reset, queue change, or audio action occurs here.
         player.playerBoxes = documents;
@@ -219,6 +278,7 @@
     }
     async function browse(args) {
         assertAccount();
+        assertRequestActive(args);
         const ticket = ++operation;
         const id = args.routeID;
         if (typeof id !== 'string' || !id.length) throw operationError('Missing player identity.');
@@ -228,13 +288,15 @@
         // player resolves that link and replaces the path with the live share ID.
         if (typeof args.token === 'string' && args.token.length) query.token = args.token;
         await globals().$router.push({path: '/p/' + encodeURIComponent(id), query});
+        assertRequestActive(args);
         await waitFor(() => {
             const p = store('player'), b = store('boxes');
             return globals().$router.currentRoute.value.params.shareid === p?.shareid &&
                 !!p?.shareid && p?.playerDocumentData && p.playerBoxesLoading === false &&
                 b?.loadingBoxes === false && Array.isArray(b.boxViewModelsCurrentLevel) &&
                 (args.groupID ? b.currentLevelId === args.groupID : !b.currentLevelId);
-        }, ticket);
+        }, ticket, args);
+        assertRequestActive(args);
         const player = store('player');
         if (typeof args.projectID === 'string' && args.projectID &&
             player?.parentProjectID !== args.projectID) {
@@ -244,21 +306,24 @@
     }
     async function projectOwnership(args) {
         assertAccount();
+        assertRequestActive(args);
         const uid = account().uid;
         const projectID = text(args.projectID);
         if (!projectID || projectID.includes('/') || projectID.includes('\\'))
             throw operationError('Missing project identity.');
         const api = await dataAPI();
+        assertRequestActive(args);
         if (typeof api.dW !== 'function' || typeof api.aJ !== 'function' || typeof api.a9 !== 'function')
-            throw operationError('This Samply web build does not expose the authorized project read.');
+            throw contractError('This Samply web build does not expose the authorized project read.');
         const snapshot = await withDeadline(api.dW(api.aJ(api.a9(), api.a7.PROJECTS, projectID)));
-        if (account()?.uid !== uid) throw operationError('The Samply account changed during the project read.');
+        if (!requestActive(args) || account()?.uid !== uid) throw supersededError();
         if (!snapshot.exists()) return {accountID: uid, projectID, exists: false, ownerID: undefined};
         const data = snapshot.data() || {};
         return {accountID: uid, projectID, exists: true, ownerID: text(data.owner)};
     }
     async function playBox(args) {
         assertAccount();
+        assertRequestActive(args);
         const ticket = ++operation;
         const p = requireStore('player'), b = requireStore('boxes', ['getBox', 'getPlayableBoxViewModel']);
         const a = requireStore('audio-module', ['loadBox', 'play']);
@@ -271,12 +336,13 @@
             for (const parentID of b.findParents?.(playable.id) || []) {
                 const parent = b.getBox(parentID);
                 if (parent?.data?.type === 'stack' && parent.activeid !== playable.id)
-                    throw operationError('This player does not allow access to other versions.');
+                    throw accessDeniedError('This player does not allow access to other versions.');
             }
         }
         const raw = b.getBox(playable.id, false);
         if (!raw || !p.playerid || !p.playerDocumentData || !p.parentProjectID || !p.parentProjectData)
-            throw operationError('Samply has not granted playback access to this file.');
+            throw accessDeniedError('Samply has not granted playback access to this file.');
+        assertRequestActive(args);
         if (a.audioboxid === playable.id) { await a.play(); return snapshot(); }
         // Same authorized objects/options used by Samply FileView's loadBox action.
         await a.loadBox({id: playable.id, data: raw}, {
@@ -288,15 +354,22 @@
             loudnessPlatform: p.loudnessPlatform, targetLufs: p.targetLufs,
             hideComments: true
         });
-        await waitFor(() => a.audioboxid === playable.id && !a.loading, ticket);
+        await waitFor(() => a.audioboxid === playable.id && !a.loading, ticket, args);
+        // A late completion after a native timeout is dropped, never reported as
+        // success and never replayed automatically.
+        assertRequestActive(args);
         if (a.error) throw operationError('Samply could not play this file.');
         return snapshot();
     }
     async function command(name, args = {}) {
+        // Native timeout notification. This does not cancel already-started page
+        // work; it only prevents that request's late result from being applied.
+        if (name === 'cancel') { markSuperseded(args.requestID); return true; }
         if (name === 'snapshot') return snapshot();
         if (name === 'refreshPage') return await refreshPage(args);
         if (name === 'navigatePage') {
             assertAccount();
+            assertRequestActive(args);
             ++operation;
             await globals().$router.push(pageRoute(args));
             return true;
@@ -305,13 +378,15 @@
         if (name === 'projectOwnership') return await projectOwnership(args);
         if (name === 'playBox') return await playBox(args);
         if (name === 'versions') {
+            assertRequestActive(args);
             const b = requireStore('boxes', ['getBoxVersions']);
             assertAccount();
-            if (!maySeeVersions()) throw operationError('This player does not allow access to other versions.');
+            if (!maySeeVersions()) throw accessDeniedError('This player does not allow access to other versions.');
             return (b.getBoxVersions(args.fileID) || []).map(vm => boxView(vm, b));
         }
         assertAccount();
         const a = requireStore('audio-module', ['play', 'pause', 'seek', 'setVolume']);
+        assertRequestActive(args);
         switch (name) {
         case 'play': await a.play(); break;
         case 'pause': await a.pause(); break;
@@ -328,7 +403,7 @@
         }
         case 'quality':
             if (!['compressed', 'lossless'].includes(args.value)) throw operationError('Invalid quality.');
-            if (typeof a.selectQuality !== 'function') throw operationError('Quality selection unavailable.');
+            if (typeof a.selectQuality !== 'function') throw contractError('Quality selection unavailable.');
             await a.selectQuality(args.value, {inplace: true}); break;
         default: throw operationError('Unsupported Tunes command.');
         }

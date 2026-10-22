@@ -155,3 +155,170 @@ struct SamplyWebSessionBridgeTests {
         }
     }
 }
+
+/// Deterministic sleeper: tests decide when a deadline fires. Cancellation
+/// resumes the matching waiter so a timed-out task does not leak.
+@MainActor
+final class ControllableSleeper: Sleeper {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
+    private var waiters: [Waiter] = []
+    var pendingCount: Int { waiters.count }
+
+    func sleep(for duration: Duration) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waiters.append(Waiter(id: id, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancel(id) }
+        }
+    }
+
+    private func cancel(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        waiters.remove(at: index).continuation.resume(throwing: CancellationError())
+    }
+
+    func fireAll() {
+        let pending = waiters
+        waiters.removeAll()
+        for waiter in pending { waiter.continuation.resume() }
+    }
+}
+
+@MainActor
+struct SamplyBridgeDeadlineTests {
+    private let snapshotJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[],"boxesReady":false,"boxes":[],"capabilities":["library"]}}
+    """
+
+    private func waitForInvocation(_ transport: ControllableBridgeTransport,
+                                   count: Int = 1) async {
+        for _ in 0..<500 {
+            if transport.count >= count { return }
+            await Task.yield()
+        }
+        Issue.record("bridge transport was not invoked")
+    }
+
+    private func waitUntil(_ condition: () -> Bool, _ message: String) async {
+        for _ in 0..<500 {
+            if condition() { return }
+            await Task.yield()
+        }
+        Issue.record(Comment(rawValue: message))
+    }
+
+    @Test func productDeadlinesMatchTheApprovedCommandClasses() {
+        let policy = SamplyBridgeDeadlinePolicy()
+        #expect(policy.timeout(for: "snapshot") == .seconds(5))
+        #expect(policy.timeout(for: "versions") == .seconds(5))
+        #expect(policy.timeout(for: "browse") == .seconds(25))
+        #expect(policy.timeout(for: "playBox") == .seconds(25))
+        #expect(policy.timeout(for: "refreshPage") == .seconds(25))
+        #expect(policy.timeout(for: "projectOwnership") == .seconds(25))
+        for command in ["play", "pause", "toggle", "next", "previous", "seek", "volume", "quality"] {
+            #expect(policy.timeout(for: command) == .seconds(10))
+        }
+    }
+
+    @Test func neverCompletingInvocationTimesOutAndDropsLateSuccess() async {
+        let transport = ControllableBridgeTransport()
+        let sleeper = ControllableSleeper()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport, sleeper: sleeper)
+        let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+        await waitUntil({ sleeper.pendingCount == 1 }, "the deadline was not scheduled")
+
+        sleeper.fireAll()
+        do {
+            _ = try await task.value
+            Issue.record("a never-completing invocation should time out")
+        } catch let error as SamplyBridgeError {
+            #expect(error == .timedOut)
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+
+        // The WebKit completion arrives after the native timeout. It must be
+        // ignored rather than resuming the continuation a second time.
+        transport.complete(0, with: snapshotJSON)
+        await Task.yield()
+    }
+
+    @Test func successRacingTheDeadlineWinsOnceAndCancelsTheDeadline() async throws {
+        let transport = ControllableBridgeTransport()
+        let sleeper = ControllableSleeper()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport, sleeper: sleeper)
+        let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+        await waitUntil({ sleeper.pendingCount == 1 }, "the deadline was not scheduled")
+
+        transport.complete(0, with: snapshotJSON)
+        let snapshot = try await task.value
+        #expect(snapshot.account?.uid == "fixture-account")
+        await waitUntil({ sleeper.pendingCount == 0 }, "the deadline was not cancelled")
+        sleeper.fireAll()
+    }
+
+    @Test func cancellingTheWaiterAlsoReleasesTheDeadline() async {
+        let transport = ControllableBridgeTransport()
+        let sleeper = ControllableSleeper()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport, sleeper: sleeper)
+        let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+        await waitUntil({ sleeper.pendingCount == 1 }, "the deadline was not scheduled")
+
+        task.cancel()
+        do {
+            _ = try await task.value
+            Issue.record("cancellation should release the waiter")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        await waitUntil({ sleeper.pendingCount == 0 }, "cancellation did not release the deadline")
+    }
+}
+
+@MainActor
+struct SamplyBridgeProtocolTests {
+    private func snapshot(version: Int = 1, capabilities: [String]) -> WebSnapshot {
+        WebSnapshot(version: version, account: .init(uid: "fixture-account"),
+                    libraryReady: true, library: [], boxesReady: false, boxes: [],
+                    capabilities: capabilities)
+    }
+
+    @Test func capabilitiesAreAdvertisedAndCheckedPerFeature() {
+        let statusOnly = snapshot(capabilities: ["library", "boxes", "playback"])
+        #expect(statusOnly.supports(.playback))
+        #expect(statusOnly.supports(.library))
+        #expect(!statusOnly.supports(.refresh))
+        #expect(!statusOnly.supports(.ownership))
+        #expect(!statusOnly.supports(.browse))
+
+        let withoutExport = snapshot(capabilities: ["library", "boxes", "playback", "browse"])
+        #expect(withoutExport.supports(.playback))
+        #expect(withoutExport.supports(.browse))
+        #expect(!withoutExport.supports(.refresh))
+        #expect(!withoutExport.supports(.ownership))
+    }
+
+    @Test func unsupportedSnapshotVersionsAreRejected() {
+        #expect(throws: SamplyBridgeError.contractMismatch) {
+            try snapshot(version: 2, capabilities: []).validateVersion()
+        }
+        #expect(throws: Never.self) {
+            try snapshot(version: 1, capabilities: []).validateVersion()
+        }
+    }
+}

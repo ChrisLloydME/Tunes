@@ -44,11 +44,19 @@ final class WebKitBridgeTransport: SamplyBridgeTransport {
         return JSON.stringify({payload: await window.__tunesSamply.command(command, args)});
         } catch (error) {
             // Never send arbitrary page exception text (which can contain URLs or credentials).
+            // Only fixed categories cross the bridge.
             const code = error?.code;
-            const rejected = code === 'TUNES_OPERATION_FAILED' ||
-                ['permission-denied', 'unauthenticated', 'not-found', 'functions/permission-denied',
-                 'functions/unauthenticated', 'functions/not-found'].includes(code);
-            return JSON.stringify({failure: code === 'TUNES_NOT_READY' ? 'notReady' : rejected ? 'operationFailed' : 'executionFailed'});
+            const rejected = ['permission-denied', 'unauthenticated', 'not-found',
+                'functions/permission-denied', 'functions/unauthenticated',
+                'functions/not-found'].includes(code);
+            let failure = 'executionFailed';
+            if (code === 'TUNES_NOT_READY') failure = 'notReady';
+            else if (code === 'TUNES_CONTRACT') failure = 'contractMismatch';
+            else if (code === 'TUNES_ACCESS_DENIED' || rejected) failure = 'accessDenied';
+            else if (code === 'TUNES_SUPERSEDED') failure = 'superseded';
+            else if (code === 'TUNES_TIMEOUT') failure = 'timedOut';
+            else if (code === 'TUNES_OPERATION_FAILED') failure = 'operationFailed';
+            return JSON.stringify({failure});
         }
         """
     }

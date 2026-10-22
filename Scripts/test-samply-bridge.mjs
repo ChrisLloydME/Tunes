@@ -29,7 +29,7 @@ test('page initialization has a distinct retryable error and recovers without re
 
 test('known rejected actions are distinct from transient page initialization', async () => {
     const f = fixture({anonymous: true});
-    await assert.rejects(f.bridge.command('play'), error => error.code === 'TUNES_OPERATION_FAILED');
+    await assert.rejects(f.bridge.command('play'), error => error.code === 'TUNES_ACCESS_DENIED');
     assert.deepEqual(f.calls, []);
     f.auth.isAnonymous = false;
     await assert.rejects(f.bridge.command('seek', {value: 'invalid'}), error => error.code === 'TUNES_OPERATION_FAILED');
@@ -163,7 +163,8 @@ test('library includes shared players, filters archives, and emits no credential
     assert.equal(s.library[1].canUpload, false);
     assert.equal(s.account.uid, 'user-a');
     assert(!JSON.stringify(s).includes('NEVER_SERIALIZE_THIS'));
-    assert.deepEqual(plain(s.capabilities), ['library', 'boxes', 'playback']);
+    assert.deepEqual(plain(s.capabilities),
+        ['library', 'boxes', 'playback', 'browse', 'refresh', 'ownership', 'versions']);
 });
 
 test('does not install on another origin or inside an iframe', () => {
@@ -222,9 +223,11 @@ test('play, pause, seek, volume, next, previous, and quality use player actions'
     await assert.rejects(f.bridge.command('volume', {value: '0.5'}), /Invalid volume/);
 });
 
-test('reports changed web contracts clearly and sanitizes nonfinite playback values', async () => {
+test('separates transient missing stores from changed store contracts', async () => {
     const f = fixture(); f.stores.delete('audio-module');
-    await assert.rejects(f.bridge.command('play'), /contract changed/);
+    await assert.rejects(f.bridge.command('play'), error => error.code === 'TUNES_NOT_READY');
+    f.stores.set('audio-module', {audioboxid: undefined, playing: false});
+    await assert.rejects(f.bridge.command('play'), error => error.code === 'TUNES_CONTRACT');
     f.stores.set('audio-module', {...f.audio, duration: Infinity, currentTime: NaN});
     const s = await f.bridge.command('snapshot');
     assert.equal(s.playback.duration, 0); assert.equal(s.playback.position, 0);
@@ -302,7 +305,7 @@ test('reports missing project ownership without inventing an owner', async () =>
 test('project ownership read requires a signed-in account', async () => {
     const f = fixture({anonymous: true});
     await assert.rejects(f.bridge.command('projectOwnership', {projectID: 'project-1'}),
-        error => error.code === 'TUNES_OPERATION_FAILED');
+        error => error.code === 'TUNES_ACCESS_DENIED');
     assert.equal(f.calls.some(call => call[0] === 'serverDoc'), false);
 });
 
@@ -512,4 +515,52 @@ test('fixtures preserve folder, version, processing, and empty-box semantics for
         assert.ok(snapshot.boxes.some(box => typeof box.duration === 'number'));
         assert.ok(JSON.stringify(snapshot).length > boxCount * 40);
     }
+});
+
+test('a superseded request drops its late refresh result without touching playback', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const originalRead = f.dataAPI.dZ;
+    f.dataAPI.dZ = async query => { await gate; return originalRead(query); };
+    const request = f.bridge.command('refreshPage', {page: 'library', requestID: 42});
+    const rejected = assert.rejects(request, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await f.bridge.command('cancel', {requestID: 42});
+    release();
+    await rejected;
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.library.length, 2);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('a superseded play request performs no audio or queue action', async () => {
+    const f = fixture();
+    await f.bridge.command('cancel', {requestID: 7});
+    await assert.rejects(
+        f.bridge.command('playBox', {fileID: 'file-1', routeID: 'share-1', requestID: 7}),
+        error => error.code === 'TUNES_SUPERSEDED');
+    assert.equal(f.calls.some(call => call[0] === 'loadBox'), false);
+    assert.equal(f.calls.some(call => call[0] === 'play'), false);
+});
+
+test('a superseded browse stops waiting for a route it no longer owns', async () => {
+    const f = fixture();
+    f.player.playerBoxesLoading = true;
+    const request = f.bridge.command('browse', {routeID: 'share-1', requestID: 9});
+    const rejected = assert.rejects(request, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setTimeout(resolve, 10));
+    await f.bridge.command('cancel', {requestID: 9});
+    await rejected;
+    f.player.playerBoxesLoading = false;
+});
+
+test('cancelling a request does not undo audio that already started', async () => {
+    const f = fixture();
+    await f.bridge.command('play', {requestID: 11});
+    assert.equal(f.audio.playing, true);
+    await f.bridge.command('cancel', {requestID: 11});
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.playback.playing, true);
 });

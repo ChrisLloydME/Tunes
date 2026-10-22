@@ -27,6 +27,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored let clock: any MonotonicClock
     @ObservationIgnored private var transportOverride: (any SamplyBridgeTransport)?
     @ObservationIgnored private var pendingInvocations: [UInt64: PendingBridgeInvocation] = [:]
+    @ObservationIgnored private let sleeper: any Sleeper
+    @ObservationIgnored private let deadlinePolicy: SamplyBridgeDeadlinePolicy
 
     var pollInterval: Duration { bridgeHealth.pollInterval(at: clock.now()) }
     @ObservationIgnored private let script: String
@@ -37,8 +39,12 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         self.init(diagnostics: nil, transport: nil)
     }
 
-    init(diagnostics: SamplyDiagnostics?, transport: (any SamplyBridgeTransport)? = nil) {
+    init(diagnostics: SamplyDiagnostics?, transport: (any SamplyBridgeTransport)? = nil,
+         sleeper: (any Sleeper)? = nil,
+         deadlinePolicy: SamplyBridgeDeadlinePolicy? = nil) {
         self.diagnostics = diagnostics ?? .shared
+        self.sleeper = sleeper ?? TaskSleeper()
+        self.deadlinePolicy = deadlinePolicy ?? SamplyBridgeDeadlinePolicy()
         clock = SystemMonotonicClock()
         transportOverride = transport
         let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
@@ -220,7 +226,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             let state: WebSnapshot = try await call("snapshot")
             guard generation == stamp else { return false }
             // A newer/different contract must never silently drive the native library.
-            guard state.version == 1 else { throw SamplyError.invalidResponse }
+            try state.validateVersion()
             profile.accept(state.account, authentication: state.authenticationState)
             sessionHistory.accept(state.authenticationState)
             snapshot = state
@@ -244,8 +250,17 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             guard !script.isEmpty, webView.url?.host == "samply.app",
                   webView.url?.scheme == "https" else { throw SamplyError.bridgeUnavailable }
         }
+        if let feature = Self.requiredFeature(for: command) {
+            // Missing feature capabilities are terminal for that feature only.
+            guard let current = snapshot else { throw SamplyBridgeError.notReady }
+            guard current.supports(feature.capability) else { throw feature.missingError }
+        }
         let stamp = generation
         let operationID = diagnostics.nextOperationID()
+        // The opaque ID lets the adapter drop late results after a native
+        // timeout without exposing account, URL, or resource data.
+        var arguments = arguments
+        arguments["requestID"] = Int(operationID)
         let category = SamplyDiagnosticCommand(command: command)
         let startedAt = clock.now()
         let result: Any?
@@ -295,6 +310,20 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         return payload
     }
 
+    /// Fixed feature mapping so a broken data export disables only refresh or
+    /// ownership reads, not playback or status.
+    private static func requiredFeature(for command: String) -> SamplyBridgeFeature? {
+        switch command {
+        case "browse": .browse
+        case "playBox", "play", "pause", "toggle", "next", "previous", "seek", "volume", "quality":
+            .playback
+        case "refreshPage": .refresh
+        case "projectOwnership": .ownership
+        case "versions": .versions
+        default: nil
+        }
+    }
+
     /// Fixed mappings only. Arbitrary page exception text never reaches native UI.
     private static func bridgeError(for failure: String) -> SamplyBridgeError {
         switch failure {
@@ -322,16 +351,22 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
                         operationID: UInt64) async throws -> Any? {
         let stamp = generation
         let transport = transportOverride ?? webKitTransport
+        let timeout = deadlinePolicy.timeout(for: command)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
                 if Task.isCancelled {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
-                pendingInvocations[operationID] = PendingBridgeInvocation(generation: stamp,
-                                                                          continuation: continuation)
+                pendingInvocations[operationID] = PendingBridgeInvocation(
+                    generation: stamp, continuation: continuation, deadline: nil)
                 transport.invoke(command: command, arguments: arguments) { [weak self] result in
                     self?.finishInvocation(operationID, result: result)
+                }
+                // The transport may already have completed synchronously.
+                if pendingInvocations[operationID] != nil {
+                    pendingInvocations[operationID]?.deadline = scheduleDeadline(
+                        operationID: operationID, timeout: timeout)
                 }
             }
         } onCancel: {
@@ -341,13 +376,40 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         }
     }
 
+    /// A WebKit child that never completes cannot hold the native waiter past
+    /// the command deadline. Cancelling the deadline task prevents a late fire.
+    private func scheduleDeadline(operationID: UInt64, timeout: Duration) -> Task<Void, Never> {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.sleeper.sleep(for: timeout)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self.finishInvocation(operationID, result: .failure(SamplyBridgeError.timedOut))
+        }
+    }
+
     private func finishInvocation(_ operationID: UInt64, result: Result<Any?, Error>) {
         guard let pending = pendingInvocations.removeValue(forKey: operationID) else { return }
+        pending.deadline?.cancel()
+        if case .failure(let error as SamplyBridgeError) = result, error == .timedOut,
+           !isSigningOut {
+            // Tell the page to drop a late result. An already-started router or
+            // audio action is not undone or automatically replayed.
+            notifySuperseded(operationID)
+        }
         guard pending.generation == generation else {
             pending.continuation.resume(throwing: CancellationError())
             return
         }
         pending.continuation.resume(with: result)
+    }
+
+    private func notifySuperseded(_ operationID: UInt64) {
+        let transport = transportOverride ?? webKitTransport
+        transport.invoke(command: "cancel", arguments: ["requestID": Int(operationID)]) { _ in }
     }
 
     /// Invalidates in-flight bridge work when the document changes. A late
@@ -363,6 +425,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         let pending = pendingInvocations
         pendingInvocations.removeAll()
         for entry in pending.values {
+            entry.deadline?.cancel()
             entry.continuation.resume(throwing: CancellationError())
         }
     }
@@ -456,6 +519,27 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
 private struct PendingBridgeInvocation {
     let generation: Int
     let continuation: CheckedContinuation<Any?, Error>
+    var deadline: Task<Void, Never>?
+}
+
+private enum SamplyBridgeFeature {
+    case browse, playback, refresh, ownership, versions
+
+    var capability: SamplyCapability {
+        switch self {
+        case .browse: .browse
+        case .playback: .playback
+        case .refresh: .refresh
+        case .ownership: .ownership
+        case .versions: .versions
+        }
+    }
+
+    /// Versions are permission-dependent; other missing capabilities indicate a
+    /// changed web contract.
+    var missingError: SamplyBridgeError {
+        self == .versions ? .accessDenied : .contractMismatch
+    }
 }
 
 private struct SamplyBridgeResponse<Payload: Decodable>: Decodable {

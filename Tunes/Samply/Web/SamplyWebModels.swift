@@ -53,6 +53,12 @@ enum WebAuthenticationState: String, Codable, Sendable {
     case checking, signedIn, signedOut
 }
 
+/// Feature-level adapter capabilities. A broken data-export build can disable
+/// refresh or ownership reads without disabling status, browsing, or playback.
+enum SamplyCapability: String, CaseIterable, Sendable {
+    case library, boxes, browse, playback, refresh, ownership, versions
+}
+
 struct WebSnapshot: Codable, Sendable {
     struct Account: Codable, Equatable, Sendable {
         let uid: String
@@ -79,6 +85,16 @@ struct WebSnapshot: Codable, Sendable {
 }
 
 extension WebSnapshot {
+    func supports(_ capability: SamplyCapability) -> Bool {
+        capabilities.contains(capability.rawValue)
+    }
+
+    /// The adapter protocol is versioned; an unknown version must not drive
+    /// native state merely because it decoded into the current shape.
+    func validateVersion() throws {
+        guard version == 1 else { throw SamplyBridgeError.contractMismatch }
+    }
+
     func hasLoadedBoxes(for item: LibraryItem, groupID: String?,
                         expectedProjectID: String? = nil) -> Bool {
         hasLoadedBoxes(routeID: item.routeID, groupID: groupID,

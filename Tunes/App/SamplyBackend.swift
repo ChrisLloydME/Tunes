@@ -197,6 +197,7 @@ final class SamplyBackend {
                 if let projectID = item.projectID { args["projectID"] = projectID }
                 if let groupID { args["groupID"] = groupID }
                 let state: WebSnapshot = try await web.call("browse", arguments: args)
+                try state.validateVersion()
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
                 if state.hasLoadedBoxes(for: item, groupID: groupID,
@@ -244,6 +245,7 @@ final class SamplyBackend {
                 let state: WebSnapshot = try await web.call("playBox", arguments: [
                     "fileID": box.id, "routeID": selectedItem.routeID
                 ])
+                try state.validateVersion()
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
                 playback.apply(state.playback, libraryItem: selectedItem)
@@ -397,7 +399,7 @@ final class SamplyBackend {
         do {
             let state: WebSnapshot = try await web.call("refreshPage", arguments: page.arguments)
             try Task.checkCancellation()
-            guard state.version == 1 else { throw SamplyError.invalidResponse }
+            try state.validateVersion()
             guard account == web.snapshot?.account?.uid, state.account?.uid == account,
                   !web.isSigningOut else { return }
             switch page {
