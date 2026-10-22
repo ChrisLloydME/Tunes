@@ -185,14 +185,7 @@ struct NewProjectSheet: View {
                         .frame(width: contentWidth)
                     Spacer(minLength: 0)
                 }
-                if isPreparingArtwork {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text(isTransferringPhoto ? "Loading photo…" : "Preparing artwork…")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                } else if let message = artworkStore.errorMessage {
+                if let message = artworkStore.errorMessage {
                     statusMessage(message, systemImage: "exclamationmark.triangle")
                 }
             }
@@ -256,9 +249,7 @@ struct NewProjectSheet: View {
             if isPreparingArtwork {
                 ProgressView()
                     .controlSize(.large)
-                    .padding(14)
-                    .background(.regularMaterial, in: Circle())
-                    .accessibilityLabel("Preparing artwork")
+                    .accessibilityLabel(isTransferringPhoto ? "Loading photo" : "Preparing artwork")
             }
             if hasArtwork {
                 VStack {
@@ -355,40 +346,7 @@ struct NewProjectSheet: View {
                 .accessibilityLabel("Choose files to upload")
             }
 
-            if fileRows.isEmpty {
-                VStack(spacing: 10) {
-                    Image(systemName: "doc.badge.plus")
-                        .font(.system(size: 34, weight: .regular))
-                        .foregroundStyle(.secondary)
-                    Text("No Files Selected")
-                        .font(.headline)
-                    Text("Choose original files to upload to this project.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 20)
-                .frame(maxWidth: .infinity, minHeight: 360)
-                .background { fileCardBackground }
-                .overlay { fileCardBorder }
-            } else {
-                List {
-                    ForEach(fileRows) { row in
-                        fileRow(row)
-                            .listRowInsets(EdgeInsets(top: 10, leading: 20,
-                                                      bottom: 10, trailing: 20))
-                            .listRowSeparator(.visible)
-                            .listRowBackground(Color.clear)
-                    }
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .contentMargins(0, for: .scrollContent)
-                .background { fileCardBackground }
-                .clipShape(.rect(cornerRadius: 12))
-                .overlay { fileCardBorder }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
+            fileListCard
 
             if creation.canRetryInitialFiles {
                 HStack {
@@ -402,6 +360,42 @@ struct NewProjectSheet: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(pagePadding)
+    }
+
+    private var fileListCard: some View {
+        VStack(spacing: 0) {
+            if fileRows.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "doc.badge.plus")
+                        .font(.system(size: 34, weight: .regular))
+                        .foregroundStyle(.secondary)
+                    Text("No Files Selected")
+                        .font(.headline)
+                    Text("Choose original files to upload to this project.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(fileRows) { row in
+                            fileRow(row)
+                            if row.id != fileRows.last?.id {
+                                Divider()
+                                    .padding(.leading, 36)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { fileCardBackground }
+        .clipShape(.rect(cornerRadius: 12))
+        .overlay { fileCardBorder }
     }
 
     private func fileRow(_ row: ProjectFileRow) -> some View {
@@ -438,6 +432,7 @@ struct NewProjectSheet: View {
                 .accessibilityLabel("Remove \(row.fileName)")
             }
         }
+        .padding(.vertical, 12)
         .contentShape(Rectangle())
     }
 
