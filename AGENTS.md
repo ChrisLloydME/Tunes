@@ -1,5 +1,16 @@
 # Project requirements
 
+## REQUIRED: Xcode Code Intelligence build and test workflow
+
+- **When the user says this agent is running through Xcode Code Intelligence, or the invocation context identifies Xcode Code Intelligence, you MUST use Xcode's built-in build and test tools first.** This is a required tool-selection rule, not an optional preference.
+- Discover the available Xcode tools before choosing a build or test command. Do not assume they are unavailable merely because they are not listed in the initial tool summary.
+- **Do not run shell-based builds/tests, repository build/test scripts, or direct `xcodebuild` commands when Xcode's built-in tools can perform the required validation.** A familiar or preconfigured command is not a reason to bypass this rule.
+- **Do not request additional sandbox permissions for a shell build/test that can be performed with Xcode's built-in tools.** Use the built-in tools instead.
+- Fall back to command-line validation only after establishing that the relevant Xcode tool is unavailable or cannot perform the required validation. State the specific limitation before using the fallback; do not silently switch to shell commands.
+- All signing, bundle identifier, Derived Data, and validation restrictions below still apply. Run hosted unit tests only: select `TunesTests` and exclude `TunesUITests`. Built-in Xcode tools do not authorize UI tests, app launches for visual validation, or screenshots.
+
+## General requirements
+
 - Keep all repository documentation, source comments, test descriptions, and app-owned text in English. User-provided project, track, and file names retain their original text.
 
 - Provide manual verification instructions in chat only; do not maintain manual verification checklists in repository documentation.
