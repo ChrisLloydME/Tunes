@@ -14,6 +14,13 @@ protocol ProjectCreationWebSession: AnyObject {
     func call<T: Decodable>(_ command: String, arguments: [String: Any]) async throws -> T
 }
 
+/// Shares the complete authenticated Library read with ordinary page refreshes.
+/// The coordinator still validates version, readiness, and account identity.
+@MainActor
+protocol ProjectLibraryRefreshing: AnyObject {
+    func refreshLibrarySnapshot(accountID: String) async throws -> WebSnapshot
+}
+
 /// Owns the one in-flight project creation and the confirmed result that survives
 /// Library refresh or navigation failures. Samply's POST /projects can create a
 /// project even when its response is lost, so this type never retries it and never
@@ -134,6 +141,7 @@ final class ProjectCreationCoordinator {
     @ObservationIgnored private let web: any ProjectCreationWebSession
     @ObservationIgnored private let uploader: any ProjectAssetUploading
     @ObservationIgnored private let credentials: any ProjectCredentialProviding
+    @ObservationIgnored weak var libraryRefresh: (any ProjectLibraryRefreshing)?
     @ObservationIgnored private var operation = UUID()
     @ObservationIgnored private var artworkTask: Task<Void, Never>?
     @ObservationIgnored private var artworkRunID: UUID?
@@ -887,7 +895,12 @@ final class ProjectCreationCoordinator {
     /// Rereads the complete authenticated web Library, including shared players.
     /// The owned-only REST project list is never substituted for this read.
     private func completeLibrary(ticket: UUID, accountID: String) async throws -> WebSnapshot? {
-        let snapshot: WebSnapshot = try await web.call("refreshPage", arguments: ["page": "library"])
+        let snapshot: WebSnapshot
+        if let libraryRefresh {
+            snapshot = try await libraryRefresh.refreshLibrarySnapshot(accountID: accountID)
+        } else {
+            snapshot = try await web.call("refreshPage", arguments: ["page": "library"])
+        }
         guard isCurrent(ticket, accountID: accountID) else { return nil }
         guard snapshot.version == 1, snapshot.libraryReady,
               snapshot.account?.uid == accountID else {

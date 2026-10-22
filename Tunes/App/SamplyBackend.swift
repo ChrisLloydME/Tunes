@@ -92,6 +92,7 @@ final class SamplyBackend {
         projectCreation.onBackgroundOutcome = { [weak self] in
             self?.refreshProjectCreationNotice()
         }
+        projectCreation.libraryRefresh = self
     }
 
     var isConnected: Bool { web.account != nil && !web.isSigningOut }
@@ -598,10 +599,31 @@ final class SamplyBackend {
         let account = accountID
         let session = sessionGeneration
         let startedAt = clock.now()
+        do {
+            let state = try await readPageSnapshot(page, accountID: account)
+            try applyPageRefresh(state, page: page, selectionGeneration: generation,
+                                 sessionGeneration: session, accountID: account,
+                                 startedAt: startedAt)
+        } catch is CancellationError { }
+        catch {
+            if generation == selectionGeneration, session == sessionGeneration,
+               account == accountID {
+                record(.serverRefresh, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
+                recordFailure(error)
+            }
+        }
+    }
+
+    /// Starts or joins one shared `refreshPage` read. The returned snapshot is
+    /// still validated by each caller, so creation recovery and UI refresh can
+    /// share the transfer without sharing trust.
+    private func readPageSnapshot(_ page: SamplyPage,
+                                  accountID: String?) async throws -> WebSnapshot {
+        let session = sessionGeneration
         let scope = SamplySharedPageRead.Scope(
             documentGeneration: web.documentGeneration,
             sessionGeneration: session,
-            accountID: account,
+            accountID: accountID,
             page: page)
 
         let read: SamplySharedPageRead
@@ -618,28 +640,15 @@ final class SamplyBackend {
         let waiter = SamplyPageReadWaiter(read: read)
         isRefreshing = true
         defer { waiter.finish(owner: self) }
-        do {
-            let state: WebSnapshot = try await withTaskCancellationHandler {
-                try Task.checkCancellation()
-                return try await read.task.value
-            } onCancel: {
-                // Cancelling one waiter must not cancel a read another waiter
-                // still needs; the last release cancels the shared task.
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    waiter.finish(owner: self)
-                }
-            }
+        return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            try applyPageRefresh(state, page: page, selectionGeneration: generation,
-                                 sessionGeneration: session, accountID: account,
-                                 startedAt: startedAt)
-        } catch is CancellationError { }
-        catch {
-            if generation == selectionGeneration, session == sessionGeneration,
-               account == accountID {
-                record(.serverRefresh, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
-                recordFailure(error)
+            return try await read.task.value
+        } onCancel: {
+            // Cancelling one waiter must not cancel a read another waiter
+            // still needs; the last release cancels the shared task.
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                waiter.finish(owner: self)
             }
         }
     }
@@ -804,5 +813,15 @@ private final class SamplyPageReadWaiter {
         guard !isFinished else { return }
         isFinished = true
         owner.releasePageRead(read)
+    }
+}
+
+
+extension SamplyBackend: ProjectLibraryRefreshing {
+    /// Creation recovery uses the same coalesced, complete server read as the
+    /// Library toolbar. Its coordinator still checks version, readiness, and
+    /// account identity before applying the result.
+    func refreshLibrarySnapshot(accountID: String) async throws -> WebSnapshot {
+        try await readPageSnapshot(.library, accountID: accountID)
     }
 }

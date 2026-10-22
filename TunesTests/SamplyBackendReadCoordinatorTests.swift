@@ -64,6 +64,25 @@ struct SamplyBackendReadCoordinatorTests {
         #expect(backend.library.first?.name == "Refreshed")
     }
 
+    @Test func creationRecoverySharesTheToolbarLibraryRead() async throws {
+        let (backend, _, transport) = makeBackend()
+        await seed(backend, transport)
+
+        let toolbar = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 2 }, "the toolbar read did not start")
+        let creation = Task {
+            try await backend.refreshLibrarySnapshot(accountID: "fixture-account")
+        }
+        await Task.yield()
+        #expect(transport.count == 2)
+
+        transport.complete(1, with: refreshedJSON)
+        await toolbar.value
+        let snapshot = try await creation.value
+        #expect(snapshot.library.first?.name == "Refreshed")
+        #expect(backend.library.first?.name == "Refreshed")
+    }
+
     @Test func cancellingOneWaiterKeepsTheSharedReadForTheOther() async {
         let (backend, session, transport) = makeBackend()
         await seed(backend, transport)
