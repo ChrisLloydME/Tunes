@@ -367,26 +367,27 @@ struct NewProjectSheet: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, 20)
                 .frame(maxWidth: .infinity, minHeight: 360)
                 .background { fileCardBackground }
                 .overlay { fileCardBorder }
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(fileRows) { row in
-                            fileRow(row)
-                            if row.id != fileRows.last?.id {
-                                Divider()
-                                    .padding(.leading, 52)
-                            }
-                        }
+                List {
+                    ForEach(fileRows) { row in
+                        fileRow(row)
+                            .listRowInsets(EdgeInsets(top: 10, leading: 20,
+                                                      bottom: 10, trailing: 20))
+                            .listRowSeparator(.visible)
+                            .listRowBackground(Color.clear)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background { fileCardBackground }
-                    .overlay { fileCardBorder }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
+                .contentMargins(0, for: .scrollContent)
+                .background { fileCardBackground }
+                .clipShape(.rect(cornerRadius: 12))
+                .overlay { fileCardBorder }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
             if creation.canRetryInitialFiles {
@@ -437,8 +438,6 @@ struct NewProjectSheet: View {
                 .accessibilityLabel("Remove \(row.fileName)")
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
         .contentShape(Rectangle())
     }
 
