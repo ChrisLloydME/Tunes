@@ -12,9 +12,16 @@ struct SamplyBridgeHealth {
 
     mutating func reset() { failureStartedAt = nil }
 
+    /// Healthy sampling stays at 700 ms. Persistent transient status failures
+    /// accelerate briefly, then back probes off through 1, 2, and 5 seconds.
+    /// Terminal feature errors do not enter this failure window.
     func pollInterval(at uptime: TimeInterval) -> Duration {
-        guard let failureStartedAt, uptime - failureStartedAt < 10 else { return .milliseconds(700) }
-        return .milliseconds(250)
+        guard let failureStartedAt else { return .milliseconds(700) }
+        let elapsed = uptime - failureStartedAt
+        if elapsed < 10 { return .milliseconds(250) }
+        if elapsed < 15 { return .seconds(1) }
+        if elapsed < 20 { return .seconds(2) }
+        return .seconds(5)
     }
 }
 

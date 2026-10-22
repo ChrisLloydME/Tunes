@@ -38,6 +38,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private let deadlinePolicy: SamplyBridgeDeadlinePolicy
 
     var pollInterval: Duration { bridgeHealth.pollInterval(at: clock.now()) }
+    var documentGeneration: Int { generation }
     @ObservationIgnored private let script: String
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
     @ObservationIgnored private lazy var webKitTransport = WebKitBridgeTransport(webView: webView, script: script)
@@ -251,8 +252,16 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             return true
         } catch {
             guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return false }
-            if error is SamplyBridgeError,
-               !bridgeHealth.recordFailure(at: clock.now()) { return false }
+            if let bridge = error as? SamplyBridgeError {
+                // A changed contract or denied access is terminal for the
+                // feature; it must not drive a retry/backoff loop.
+                guard bridge.isTransient else {
+                    bridgeHealth.reset()
+                    connectionError = bridge.localizedDescription
+                    return false
+                }
+                guard bridgeHealth.recordFailure(at: clock.now()) else { return false }
+            }
             connectionError = error.localizedDescription
             return false
         }
@@ -283,8 +292,16 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             return true
         } catch {
             guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return false }
-            if error is SamplyBridgeError,
-               !bridgeHealth.recordFailure(at: clock.now()) { return false }
+            if let bridge = error as? SamplyBridgeError {
+                // A changed contract or denied access is terminal for the
+                // feature; it must not drive a retry/backoff loop.
+                guard bridge.isTransient else {
+                    bridgeHealth.reset()
+                    connectionError = bridge.localizedDescription
+                    return false
+                }
+                guard bridgeHealth.recordFailure(at: clock.now()) else { return false }
+            }
             connectionError = error.localizedDescription
             return false
         }

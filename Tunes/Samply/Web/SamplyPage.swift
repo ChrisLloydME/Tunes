@@ -1,6 +1,6 @@
 import Foundation
 
-enum SamplyPage: Equatable, Sendable {
+enum SamplyPage: Hashable, Sendable {
     case library
     case album(routeID: String, groupID: String?)
 

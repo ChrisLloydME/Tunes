@@ -12,7 +12,7 @@ The repository uses a feature-oriented single-app architecture. `App`, `Features
 Tunes/
 ├── App/                         App entry point, scenes, and cross-feature coordination
 │   ├── TunesApp.swift           Creates the shared backend; configures windows, Settings, and menus
-│   ├── ContentView.swift        Main interface, navigation, toolbar, upload status, and recovery task
+│   ├── ContentView.swift        Main interface, navigation, toolbar, upload status, and page intent
 │   ├── SamplyBackend.swift      Dependency assembly and account, browsing, playback, creation, and upload coordination
 │   └── SamplyPageFocus.swift    Exposes the current page to menus through SwiftUI FocusedValues
 ├── Features/
@@ -180,9 +180,9 @@ The player bar's artwork and artwork glow use the playing `LibraryItem.artwork`,
 
 `SamplyPage` represents the Library, album, or folder target for both toolbar and menu actions. SwiftUI focus propagation lives in `App/SamplyPageFocus.swift`.
 
-`refreshPage` updates current-page data while preserving the existing list until success. It neither reloads the WebView nor invokes audio operations. `navigatePage` navigates to the corresponding web page and shows the same Samply window.
+`refreshPage` updates current-page data while preserving the existing list until success. Identical in-flight page reads are coalesced by document generation, session epoch, account, and page target; cancelling one waiter keeps the shared read for the others, and cancelling the final waiter invalidates it. A server refresh never joins a store snapshot. `refreshPage` neither reloads the WebView nor invokes audio operations. `navigatePage` navigates to the corresponding web page and shows the same Samply window.
 
-`ContentView` owns a recovery task that cancels when the page or recovery requirement changes. It calls `backend.recover` with backoff from 250 milliseconds to 2 seconds. Recovery retries reads only; it never replays playback, seek, or upload operations. Explicit permission denials and contract errors are not treated as automatically recoverable transient failures.
+`ContentView` supplies the current page intent; `SamplyBackend` owns recovery. One automatic episode performs at most three read attempts at 0.5, 1, and 2 seconds with bounded jitter, and stops on access denial, a changed contract, confirmed sign-out, cancellation, or a page/account/selection change. After the budget is exhausted the last content and an actionable error remain, and the same unchanged error does not restart the episode. An explicit **Try Again** starts a new budget. Runtime health probes are separate: after 10 seconds of persistent transient status failure they back off through 1, 2, and then 5 seconds. Recovery retries reads only; it never replays playback, seek, or upload operations, and it never synthesizes empty content.
 
 ### Optional uploads and artwork
 

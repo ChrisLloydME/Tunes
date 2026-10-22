@@ -50,16 +50,30 @@ final class SamplyBackend {
     @ObservationIgnored private var hasRecordedLibraryAcceptance = false
     @ObservationIgnored private var pollSchedule = SamplyPollSchedule()
     @ObservationIgnored private var lastRuntimeIdentity: RuntimeIdentity?
+    @ObservationIgnored private let recoveryPolicy: SamplyReadRecoveryPolicy
+    @ObservationIgnored private let recoverySleeper: any Sleeper
+    @ObservationIgnored private let randomUnit: () -> Double
+    @ObservationIgnored private var recoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var recoveryRunID: UInt64 = 0
+    @ObservationIgnored private(set) var recoveryExhausted = false
+    @ObservationIgnored private var activePageRead: SamplySharedPageRead?
+    @ObservationIgnored private(set) var pageIntent: SamplyPage = .library
 
     init(tokens: (any TokenStore)? = nil, diagnostics: SamplyDiagnostics? = nil,
-         clock: (any MonotonicClock)? = nil) {
+         clock: (any MonotonicClock)? = nil, web suppliedWeb: SamplyWebSession? = nil,
+         recoveryPolicy: SamplyReadRecoveryPolicy? = nil,
+         sleeper: (any Sleeper)? = nil,
+         randomUnit: (() -> Double)? = nil) {
         let tokens = tokens ?? FileTokenStore.applicationStore()
         self.tokens = tokens
         self.diagnostics = diagnostics ?? .shared
         self.clock = clock ?? SystemMonotonicClock()
-        let web = SamplyWebSession(diagnostics: diagnostics)
+        self.recoveryPolicy = recoveryPolicy ?? SamplyReadRecoveryPolicy()
+        recoverySleeper = sleeper ?? TaskSleeper()
+        self.randomUnit = randomUnit ?? { Double.random(in: 0...1) }
+        let web = suppliedWeb ?? SamplyWebSession(diagnostics: diagnostics)
         self.web = web
-        let api = SamplyAPI(tokens: tokens)
+        let api = SamplyAPI(tokens: tokens, diagnostics: self.diagnostics)
         self.api = api
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
@@ -98,13 +112,21 @@ final class SamplyBackend {
         monitor = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                await self.poll()
-                let delay = self.pollSchedule.nextPollDelay(
-                    at: self.clock.now(), interactive: self.isInteractive)
+                let delay = await self.poll()
                 do { try await Task.sleep(for: delay) }
                 catch { return }
             }
         }
+    }
+
+    /// Sets the visible page intent used by recovery. A page change stops the
+    /// current episode and invalidates any shared server read.
+    func setPageIntent(_ page: SamplyPage) {
+        guard page != pageIntent else { return }
+        pageIntent = page
+        resetRecoveryBudget()
+        cancelActivePageRead()
+        if needsActionRecovery { reconcileRecovery() }
     }
 
     /// True while a user action owns the bridge. Background full reads wait; the
@@ -114,22 +136,32 @@ final class SamplyBackend {
     }
 
     /// The single polling owner: one runtime sample per tick, plus a complete
-    /// content read when it is due or invalidated.
-    private func poll() async {
-        if await web.refreshRuntime(), !web.isSigningOut {
+    /// content read when it is due or invalidated. Returns the next probe delay.
+    private func poll() async -> Duration {
+        let runtimeSucceeded = await web.refreshRuntime()
+        if runtimeSucceeded, !web.isSigningOut {
             acceptRuntimeSnapshot()
         }
-        guard !isInteractive, pollSchedule.shouldReadFullContent(at: clock.now()) else { return }
-        let generation = pollSchedule.invalidationGeneration
-        let refreshed = await web.refresh()
-        if refreshed, !web.isSigningOut {
-            acceptSnapshot()
-            pollSchedule.recordFullRead(at: clock.now(), succeeded: true,
-                                        generation: generation)
-        } else {
-            pollSchedule.recordFullRead(at: clock.now(), succeeded: false,
-                                        generation: generation)
+        if runtimeSucceeded, !isInteractive,
+           pollSchedule.shouldReadFullContent(at: clock.now()) {
+            let generation = pollSchedule.invalidationGeneration
+            let refreshed = await web.refresh()
+            if refreshed, !web.isSigningOut {
+                acceptSnapshot()
+                pollSchedule.recordFullRead(at: clock.now(), succeeded: true,
+                                            generation: generation)
+            } else {
+                pollSchedule.recordFullRead(at: clock.now(), succeeded: false,
+                                            generation: generation)
+            }
         }
+        reconcileRecovery()
+        if !runtimeSucceeded {
+            // Runtime health owns probe backoff. A healthy runtime read must not
+            // clear a separate unresolved content-refresh failure.
+            return web.pollInterval
+        }
+        return pollSchedule.nextPollDelay(at: clock.now(), interactive: isInteractive)
     }
 
     @discardableResult
@@ -137,6 +169,8 @@ final class SamplyBackend {
         let newAccount = account?.uid
         guard !hasResolvedTokenAccount || newAccount != accountID else { return false }
         sessionGeneration &+= 1
+        cancelActivePageRead()
+        resetRecoveryBudget()
         projectCreation.invalidate()
         invalidateSelection()
         content.acceptLibrary([])
@@ -228,19 +262,101 @@ final class SamplyBackend {
 
     var needsActionRecovery: Bool { hasTransientError || playback.hasTransientError }
 
+    /// Explicit user retry. It starts a fresh recovery budget and never replays
+    /// playback, seek, or upload commands.
     func recover(_ page: SamplyPage, forcePageRefresh: Bool = false) async {
-        // Retry reads only. Never replay play/pause/seek/upload commands or reload the WebView.
+        pageIntent = page
+        resetRecoveryBudget()
         let needsPageRefresh = forcePageRefresh || hasTransientError
         if await web.refresh() {
             acceptSnapshot()
             noteFullContentAccepted()
         }
         if needsPageRefresh { await refresh(page) }
+        reconcileRecovery()
     }
 
     private func recordFailure(_ failure: Error) {
         error = failure.localizedDescription
         hasTransientError = (failure as? SamplyBridgeError)?.isTransient == true
+        reconcileRecovery()
+    }
+
+    /// One automatic episode, owned by the backend. The view supplies only the
+    /// current page intent and explicit retries.
+    /// Internal so the coordinator can be driven deterministically in tests;
+    /// production calls it from the poll and failure paths only.
+    func reconcileRecovery() {
+        guard needsActionRecovery else {
+            if recoveryTask != nil || recoveryExhausted {
+                recoveryRunID &+= 1
+                recoveryTask?.cancel()
+                recoveryTask = nil
+                recoveryExhausted = false
+            }
+            return
+        }
+        guard recoveryTask == nil, !recoveryExhausted else { return }
+        startRecoveryEpisode()
+    }
+
+    private func startRecoveryEpisode() {
+        recoveryRunID &+= 1
+        let runID = recoveryRunID
+        let page = pageIntent
+        let account = accountID
+        let session = sessionGeneration
+        let selection = selectionGeneration
+        let policy = recoveryPolicy
+        recoveryTask = Task { [weak self] in
+            guard let self else { return }
+            for attempt in 0..<policy.maximumAttempts {
+                let delay = policy.delay(forAttempt: attempt, randomValue: self.randomUnit())
+                do { try await self.recoverySleeper.sleep(for: .seconds(delay)) }
+                catch { return }
+                guard !Task.isCancelled, self.recoveryRunID == runID,
+                      self.accountID == account, self.sessionGeneration == session,
+                      self.pageIntent == page else { return }
+                if case .album = page, self.selectionGeneration != selection { return }
+
+                if self.hasTransientError {
+                    await self.refresh(page)
+                } else if await self.web.refresh() {
+                    self.acceptSnapshot()
+                    self.noteFullContentAccepted()
+                }
+                guard self.recoveryRunID == runID else { return }
+                if !self.needsActionRecovery {
+                    self.recoveryExhausted = false
+                    self.completeRecovery(runID: runID)
+                    return
+                }
+                if !self.hasTransientError, self.error != nil {
+                    // Access denial or a changed contract is terminal; do not
+                    // spend the rest of the budget repeating it.
+                    self.recoveryExhausted = true
+                    self.completeRecovery(runID: runID)
+                    return
+                }
+            }
+            guard self.recoveryRunID == runID else { return }
+            // Retain existing content and the actionable error. The episode does
+            // not restart merely because that unchanged error remains visible.
+            self.recoveryExhausted = true
+            self.completeRecovery(runID: runID)
+        }
+    }
+
+    private func resetRecoveryBudget() {
+        recoveryRunID &+= 1
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        recoveryExhausted = false
+    }
+
+    private func completeRecovery(runID: UInt64) {
+        guard recoveryRunID == runID else { return }
+        recoveryTask = nil
     }
 
     func select(_ item: LibraryItem) {
@@ -471,47 +587,110 @@ final class SamplyBackend {
         }
     }
 
+    /// Coalesces identical page reads. Waiters share one `refreshPage` request;
+    /// a different page/account/document epoch starts a separate read. A server
+    /// refresh can never join a store snapshot, because only this command is
+    /// shared here.
     func refresh(_ page: SamplyPage) async {
-        guard isConnected, !isRefreshing, !isBrowsing, !isPlayingSelection else { return }
+        guard isConnected, !isBrowsing, !isPlayingSelection, !web.isSigningOut else { return }
         let generation = selectionGeneration
-        let account = web.account?.uid
+        let account = accountID
+        let session = sessionGeneration
         let startedAt = clock.now()
-        isRefreshing = true
-        defer { isRefreshing = false }
-        do {
-            let state: WebSnapshot = try await web.call("refreshPage", arguments: page.arguments)
-            try Task.checkCancellation()
-            try state.validateVersion()
-            guard account == web.account?.uid, state.account?.uid == account,
-                  !web.isSigningOut else { return }
-            switch page {
-            case .library:
-                guard state.libraryReady else { throw SamplyError.invalidResponse }
-                content.acceptLibrary(state.library)
-                noteFullContentAccepted()
-                record(.serverRefresh, since: startedAt, itemCount: state.library.count)
-            case .album(let routeID, let groupID):
-                guard generation == selectionGeneration, let selectedItem,
-                      selectedItem.routeID == routeID, folderPath.last?.id == groupID else { return }
-                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID,
-                                           expectedProjectID: selectedItem.projectID) else {
-                    throw SamplyError.invalidResponse
-                }
-                content.acceptBoxes(state.boxes)
-                albumLoadState = .loaded
-                noteFullContentAccepted()
-                record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
+        let scope = SamplySharedPageRead.Scope(
+            documentGeneration: web.documentGeneration,
+            sessionGeneration: session,
+            accountID: account,
+            page: page)
+
+        let read: SamplySharedPageRead
+        if let active = activePageRead, active.scope == scope {
+            read = active
+        } else {
+            activePageRead?.task.cancel()
+            let task: Task<WebSnapshot, Error> = Task { [web] in
+                try await web.call("refreshPage", arguments: page.arguments)
             }
-            // Refresh only updates page data. The media engine and native playback stay intact.
-            error = nil
-            hasTransientError = false
+            read = SamplySharedPageRead(scope: scope, task: task)
+            activePageRead = read
+        }
+        let waiter = SamplyPageReadWaiter(read: read)
+        isRefreshing = true
+        defer { waiter.finish(owner: self) }
+        do {
+            let state: WebSnapshot = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await read.task.value
+            } onCancel: {
+                // Cancelling one waiter must not cancel a read another waiter
+                // still needs; the last release cancels the shared task.
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    waiter.finish(owner: self)
+                }
+            }
+            try Task.checkCancellation()
+            try applyPageRefresh(state, page: page, selectionGeneration: generation,
+                                 sessionGeneration: session, accountID: account,
+                                 startedAt: startedAt)
         } catch is CancellationError { }
         catch {
-            if generation == selectionGeneration, account == web.account?.uid {
+            if generation == selectionGeneration, session == sessionGeneration,
+               account == accountID {
                 record(.serverRefresh, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
                 recordFailure(error)
             }
         }
+    }
+
+    private func applyPageRefresh(_ state: WebSnapshot, page: SamplyPage,
+                                  selectionGeneration: Int, sessionGeneration: UInt64,
+                                  accountID: String?, startedAt: TimeInterval) throws {
+        try state.validateVersion()
+        guard sessionGeneration == self.sessionGeneration, accountID == self.accountID,
+              accountID == web.account?.uid, state.account?.uid == accountID,
+              !web.isSigningOut else { throw CancellationError() }
+        switch page {
+        case .library:
+            guard state.libraryReady else { throw SamplyError.invalidResponse }
+            content.acceptLibrary(state.library)
+            noteFullContentAccepted()
+            record(.serverRefresh, since: startedAt, itemCount: state.library.count)
+        case .album(let routeID, let groupID):
+            guard selectionGeneration == self.selectionGeneration, let selectedItem,
+                  selectedItem.routeID == routeID,
+                  folderPath.last?.id == groupID else {
+                throw CancellationError()
+            }
+            guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID,
+                                       expectedProjectID: selectedItem.projectID) else {
+                throw SamplyError.invalidResponse
+            }
+            content.acceptBoxes(state.boxes)
+            albumLoadState = .loaded
+            noteFullContentAccepted()
+            record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
+        }
+        // Refresh only updates page data. The media engine and native playback stay intact.
+        error = nil
+        hasTransientError = false
+    }
+
+    fileprivate func releasePageRead(_ read: SamplySharedPageRead) {
+        read.waiters -= 1
+        guard read.waiters <= 0 else { return }
+        read.task.cancel()
+        if activePageRead === read {
+            activePageRead = nil
+            isRefreshing = false
+        }
+    }
+
+    private func cancelActivePageRead() {
+        guard let read = activePageRead else { return }
+        activePageRead = nil
+        isRefreshing = false
+        read.task.cancel()
     }
 
     func openInSamply(_ page: SamplyPage) async {
@@ -529,6 +708,8 @@ final class SamplyBackend {
     }
 
     func signOut() async {
+        cancelActivePageRead()
+        resetRecoveryBudget()
         projectCreation.invalidate()
         invalidateSelection()
         content.acceptLibrary([])
@@ -582,4 +763,44 @@ private struct RuntimeIdentity: Equatable {
     let projectID: String?
     let levelID: String?
     let boxesReady: Bool
+}
+
+/// One shared page read. The task outlives an individual waiter; cancellation
+/// only cancels it when the final waiter releases.
+@MainActor
+private final class SamplySharedPageRead {
+    struct Scope: Hashable {
+        let documentGeneration: Int
+        let sessionGeneration: UInt64
+        let accountID: String?
+        let page: SamplyPage
+    }
+
+    let scope: Scope
+    let task: Task<WebSnapshot, Error>
+    var waiters = 0
+
+    init(scope: Scope, task: Task<WebSnapshot, Error>) {
+        self.scope = scope
+        self.task = task
+    }
+}
+
+/// Exactly-once release for one waiter. The cancellation handler and the normal
+/// return path can both run, but only the first one decrements the shared read.
+@MainActor
+private final class SamplyPageReadWaiter {
+    private let read: SamplySharedPageRead
+    private var isFinished = false
+
+    init(read: SamplySharedPageRead) {
+        self.read = read
+        read.waiters += 1
+    }
+
+    func finish(owner: SamplyBackend) {
+        guard !isFinished else { return }
+        isFinished = true
+        owner.releasePageRead(read)
+    }
 }

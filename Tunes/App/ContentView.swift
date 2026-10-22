@@ -130,18 +130,12 @@ struct ContentView: View {
         }
         .focusedSceneValue(\.samplyPage, currentPage)
         .frame(minWidth: 860, minHeight: 560)
-        .task { backend.start() }
-        .task(id: "\(currentPage)/\(backend.needsActionRecovery)") {
-            guard backend.needsActionRecovery else { return }
-            let page = currentPage
-            var delay = 250
-            while backend.needsActionRecovery, !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(delay)) }
-                catch { return }
-                guard !Task.isCancelled else { return }
-                await backend.recover(page)
-                delay = min(delay * 2, 2000)
-            }
+        .task {
+            backend.setPageIntent(currentPage)
+            backend.start()
+        }
+        .onChange(of: currentPage) { _, page in
+            backend.setPageIntent(page)
         }
         .onChange(of: issue) { _, value in
             if value == nil { showsIssueDetails = false }

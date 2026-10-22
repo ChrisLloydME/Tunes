@@ -8,9 +8,14 @@ struct SamplyBridgeHealthTests {
         _ = health.recordFailure(at: 100)
         #expect(health.pollInterval(at: 100) == .milliseconds(250))
         #expect(health.pollInterval(at: 109.9) == .milliseconds(250))
-        #expect(health.pollInterval(at: 110) == .milliseconds(700))
+        #expect(health.pollInterval(at: 110) == .seconds(1))
+        #expect(health.pollInterval(at: 114.9) == .seconds(1))
+        #expect(health.pollInterval(at: 115) == .seconds(2))
+        #expect(health.pollInterval(at: 119.9) == .seconds(2))
+        #expect(health.pollInterval(at: 120) == .seconds(5))
+        #expect(health.pollInterval(at: 200) == .seconds(5))
         health.reset()
-        #expect(health.pollInterval(at: 111) == .milliseconds(700))
+        #expect(health.pollInterval(at: 201) == .milliseconds(700))
     }
 
     @Test func rejectedActionsAreNotAutomaticallyRetried() {
