@@ -11,6 +11,7 @@ final class SamplyUploader: ProjectAssetUploading {
 
     nonisolated static let ticketTimeout: TimeInterval = 30
     nonisolated static let filePutTimeout: TimeInterval = 120
+    nonisolated static let filePutResourceTimeout: TimeInterval = 24 * 60 * 60
     nonisolated static let artworkPutTimeout: TimeInterval = 60
 
     private(set) var status: Status = .idle
@@ -23,6 +24,7 @@ final class SamplyUploader: ProjectAssetUploading {
     @ObservationIgnored private let storageConfiguration: URLSessionConfiguration?
     @ObservationIgnored private let ticketTimeout: TimeInterval
     @ObservationIgnored private let filePutTimeout: TimeInterval
+    @ObservationIgnored private let filePutResourceTimeout: TimeInterval
     @ObservationIgnored private let artworkPutTimeout: TimeInterval
 
     var isRunning: Bool { status == .preparing || status == .uploading }
@@ -30,19 +32,23 @@ final class SamplyUploader: ProjectAssetUploading {
     init(api: SamplyAPI, storageConfiguration: URLSessionConfiguration? = nil,
          ticketTimeout: TimeInterval = SamplyUploader.ticketTimeout,
          filePutTimeout: TimeInterval = SamplyUploader.filePutTimeout,
+         filePutResourceTimeout: TimeInterval = SamplyUploader.filePutResourceTimeout,
          artworkPutTimeout: TimeInterval = SamplyUploader.artworkPutTimeout) {
         self.api = api
         self.storageConfiguration = storageConfiguration
         self.ticketTimeout = max(0.1, ticketTimeout)
         self.filePutTimeout = max(0.1, filePutTimeout)
+        self.filePutResourceTimeout = max(0.1, filePutResourceTimeout)
         self.artworkPutTimeout = max(0.1, artworkPutTimeout)
     }
 
     /// The album uploader's visible single-file flow. The token is captured by
     /// the caller when the operation starts; a later replacement is not silently
     /// read halfway through.
-    func upload(file: URL, projectID: String, parentID: String? = nil, token: String? = nil) {
-        guard !isRunning else { return }
+    @discardableResult
+    func upload(file: URL, projectID: String, parentID: String? = nil,
+                token: String? = nil) -> Task<Void, Never>? {
+        guard !isRunning else { return nil }
         let id = UUID()
         operationID = id
         status = .preparing
@@ -50,7 +56,11 @@ final class SamplyUploader: ProjectAssetUploading {
         fileName = file.lastPathComponent
         uploadedBoxID = nil
         task = Task { [weak self] in
-            guard let self else { return }
+            guard let self, self.operationID == id else { return }
+            guard !Task.isCancelled else {
+                self.status = .cancelled
+                return
+            }
             self.status = .uploading
             let outcome = await self.transfer(
                 kind: .originalFile, projectID: projectID, parentID: parentID,
@@ -78,6 +88,7 @@ final class SamplyUploader: ProjectAssetUploading {
                 self.status = .uncertain(message)
             }
         }
+        return task
     }
 
     func performUpload(file: URL, projectID: String, parentID: String?,
@@ -178,7 +189,7 @@ final class SamplyUploader: ProjectAssetUploading {
             return .cancelled(.ticketReceived, ticket: identity)
         }
 
-        let request: URLRequest
+        var request: URLRequest
         do {
             request = try Self.storageRequest(ticket: ticket, kind: kind,
                                               expectedProjectID: projectID)
@@ -203,15 +214,8 @@ final class SamplyUploader: ProjectAssetUploading {
             return .cancelled(.ticketReceived, ticket: identity)
         }
 
-        let config = storageConfiguration?.copy() as? URLSessionConfiguration
-            ?? URLSessionConfiguration.ephemeral
-        config.httpShouldSetCookies = false
-        config.urlCache = nil
-        config.timeoutIntervalForRequest = kind == .artwork
-            ? artworkPutTimeout : filePutTimeout
-        // A resource timeout cannot outlive the per-request deadline by much.
-        config.timeoutIntervalForResource = kind == .artwork
-            ? artworkPutTimeout : filePutTimeout
+        let config = storageSessionConfiguration(for: kind)
+        request.timeoutInterval = config.timeoutIntervalForRequest
         let delegate = UploadDelegate { sent, total in
             guard total > 0 else { return }
             progress?(min(max(Double(sent) / Double(total), 0), 1))
@@ -255,6 +259,20 @@ final class SamplyUploader: ProjectAssetUploading {
                 "The upload was interrupted after submission started. Samply may have received the file; check the project before trying again.",
                 phase: .putStarted, ticket: identity)
         }
+    }
+
+    func storageSessionConfiguration(for kind: UploadKind) -> URLSessionConfiguration {
+        let config = storageConfiguration?.copy() as? URLSessionConfiguration
+            ?? URLSessionConfiguration.ephemeral
+        config.httpShouldSetCookies = false
+        config.urlCache = nil
+        // Original files may take hours while progressing. Bound inactivity
+        // separately from the entire transfer; artwork keeps a short total limit.
+        config.timeoutIntervalForRequest = kind == .artwork
+            ? artworkPutTimeout : filePutTimeout
+        config.timeoutIntervalForResource = kind == .artwork
+            ? artworkPutTimeout : filePutResourceTimeout
+        return config
     }
 
     private struct PreparedUpload {

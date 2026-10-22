@@ -108,6 +108,61 @@ struct SamplyUploaderTests {
         #expect(!outcome.isSafelyRetryable)
     }
 
+    @Test func originalTransferLimitIsIndependentOfInactivityAndArtworkBounds() {
+        let (uploader, _) = makeUploader(ticketTimeout: 1, artworkPutTimeout: 0.2)
+        let original = uploader.storageSessionConfiguration(for: .originalFile)
+        let artwork = uploader.storageSessionConfiguration(for: .artwork)
+
+        #expect(original.timeoutIntervalForRequest == 1)
+        #expect(original.timeoutIntervalForResource == 24 * 60 * 60)
+        #expect(artwork.timeoutIntervalForRequest == 0.2)
+        #expect(artwork.timeoutIntervalForResource == 0.2)
+        #expect(SamplyUploader.filePutTimeout == 120)
+        #expect(SamplyUploader.artworkPutTimeout == 60)
+    }
+
+    @Test func cancellationBeforeScheduledUploadStartsDoesNotLeavePreparingState() async throws {
+        let (uploader, _) = makeUploader(ticketTimeout: 1, artworkPutTimeout: 1)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let pending = try #require(uploader.upload(file: file, projectID: "project-1"))
+        uploader.cancel()
+        await pending.value
+
+        #expect(uploader.status == .cancelled)
+        #expect(!uploader.isRunning)
+    }
+
+    @Test func resetBeforeScheduledUploadStartsKeepsIdleAndAcceptsAnotherUpload() async throws {
+        let counter = UploadRequestCounter()
+        UploadURLProtocol.handler = { _ in
+            _ = counter.increment()
+            return .respond(200, [:], artworkTicketJSON)
+        }
+        let (uploader, _) = makeUploader(ticketTimeout: 1, artworkPutTimeout: 1)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        // There is no suspension on the main actor between scheduling and reset.
+        // Awaiting the obsolete handle proves that its cancelled body has run.
+        let obsolete = try #require(uploader.upload(file: file, projectID: "project-1"))
+        uploader.reset()
+        await obsolete.value
+
+        #expect(uploader.status == .idle)
+        #expect(!uploader.isRunning)
+        #expect(uploader.fileName.isEmpty)
+        #expect(uploader.progress == 0)
+        #expect(uploader.uploadedBoxID == nil)
+        #expect(counter.count == 0)
+
+        let next = try #require(uploader.upload(file: file, projectID: "project-1"))
+        #expect(uploader.status == .preparing)
+        await next.value
+        guard case .failed = uploader.status else {
+            Issue.record("The next upload must run and report the missing local file")
+            return
+        }
+        #expect(!uploader.isRunning)
+    }
+
     private func makeUploader(ticketTimeout: TimeInterval,
                               artworkPutTimeout: TimeInterval)
         -> (SamplyUploader, MemoryTokenStore) {
