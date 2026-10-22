@@ -202,7 +202,7 @@ final class SamplyBackend {
         if identity != lastRuntimeIdentity {
             lastRuntimeIdentity = identity
             pollSchedule.markFullContentNeeded()
-        } else if identityChanged || web.snapshot == nil {
+        } else if identityChanged {
             pollSchedule.markFullContentNeeded()
         }
 

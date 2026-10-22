@@ -35,7 +35,7 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
   `SharedViews/DetailContentLayout.swift`, `SharedViews/EqualizerView.swift`,
   and the row style from `SharedViews/InteractiveCardStyle.swift`.
   Copied the palette extraction code from `Utilities/ColorExtractor.swift` with
-  the existing Tunes memory-only artwork cache. Removed previews, haptics, and
+  the shared Tunes memory-only artwork pipeline. Removed previews, haptics, and
   the upstream palette cache dependency; inlined the quick animation constant.
   Tunes uses its theme accent for interactive controls. Palette extraction retains
   bright saturated artwork pixels, ignores transparent pixels, and uses a neutral
@@ -52,8 +52,8 @@ The license is also included in the app bundle as `Kaset-LICENSE.txt`.
   `PlayerBarSliderLoadingShimmer`, `PlayerBarVerticalSlider`,
   `PlayerBarVolumeOverlayHost`, and `PlayerBarSeekHold` from `Sources/Kaset/Views/`.
   Local changes inline Kaset's quick animation constant, remove its macOS 15
-  compatibility environment, and replace its artwork cache with a memory-only
-  Tunes cache. `PlayerBarGlass.swift` retains the native macOS branch of
+  compatibility environment, and replace its artwork cache with the shared memory-only
+  Tunes artwork pipeline. `PlayerBarGlass.swift` retains the native macOS branch of
   `Sources/Kaset/Utilities/LiquidGlassCompat.swift`.
 - Interactive controls use SwiftUI `Color.accentColor`; Kaset's fixed pink/red
   accent asset has been removed.

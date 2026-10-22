@@ -23,6 +23,7 @@ final class SamplyAPI {
         else {
             let config = URLSessionConfiguration.ephemeral
             config.timeoutIntervalForRequest = 30
+            config.timeoutIntervalForResource = 60
             config.httpShouldSetCookies = false
             config.urlCache = nil
             self.session = URLSession(configuration: config, delegate: NoRedirectDelegate(), delegateQueue: nil)

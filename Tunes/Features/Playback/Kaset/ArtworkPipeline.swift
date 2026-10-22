@@ -146,8 +146,8 @@ final class ArtworkPipeline {
     /// Extracts and caches a palette for the same decoded-image identity.
     func palette(for url: URL?, targetSize: CGSize = CGSize(width: 64, height: 64))
         async -> ColorExtractor.ColorPalette {
-        guard url != nil else { return .default }
-        let key = DecodeKey(epoch: epoch, url: url!,
+        guard let url else { return .default }
+        let key = DecodeKey(epoch: epoch, url: url,
                             bucket: Self.bucket(for: targetSize, scale: Self.displayScale))
         if let cached = palettes[key] { return cached }
         guard let image = await image(for: url, targetSize: targetSize) else { return .default }
