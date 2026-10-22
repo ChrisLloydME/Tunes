@@ -163,7 +163,9 @@ final class ProjectCredentialAuthority: ProjectCredentialProviding {
         let previousState = state
         let previousVerified = verified
         let previousStoredToken = storedToken
-        state = .validating
+        // Candidate validation must not suspend the active credential or its
+        // captured mutation contexts. Only a successful replacement changes it.
+        if previousVerified == nil { state = .validating }
         do {
             try await verifyIdentity(token: trimmed, accountID: accountID,
                                      generation: generation, revision: revision)
@@ -180,7 +182,7 @@ final class ProjectCredentialAuthority: ProjectCredentialProviding {
                               credentialRevision: credentialRevision)
         } catch {
             guard isSameSession(accountID: accountID, generation: generation),
-                  credentialRevision == revision else {
+                  credentialRevision == revision, validationID == id else {
                 throw ProjectCredentialError.cancelled
             }
             let publicError = Self.publicError(from: error)

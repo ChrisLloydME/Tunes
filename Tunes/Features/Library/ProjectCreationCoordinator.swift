@@ -744,8 +744,8 @@ final class ProjectCreationCoordinator {
             }
             guard isMutationCurrent(context, projectID: created.project.id) else {
                 markWaitingFilesCancelled(
-                    retryable: false, boxID: nil,
-                    message: "Uploads stopped because the account or token changed. Check the project before retrying.")
+                    retryable: true, boxID: nil,
+                    message: "Not uploaded because the account or token changed. Verify the token before retrying.")
                 return
             }
             let file = initialFiles[index]
@@ -768,8 +768,8 @@ final class ProjectCreationCoordinator {
             apply(outcome, at: updatedIndex)
             if !isMutationCurrent(context, projectID: created.project.id) {
                 markWaitingFilesCancelled(
-                    retryable: false, boxID: nil,
-                    message: "Uploads stopped because the account or token changed. Check the project before retrying.")
+                    retryable: true, boxID: nil,
+                    message: "Not uploaded because the account or token changed. Verify the token before retrying.")
                 return
             }
             if case .cancelled = outcome.disposition, !outcome.isSafelyRetryable {

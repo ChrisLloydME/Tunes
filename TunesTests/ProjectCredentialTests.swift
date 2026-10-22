@@ -117,6 +117,77 @@ struct ProjectCredentialTests {
                                              credentialRevision: 1))
     }
 
+    @Test func candidateValidationPreservesActiveQueueUntilSuccessfulReplacement() async throws {
+        for acceptsCandidate in [false, true] {
+            let tokens = MemoryTokenStore()
+            try tokens.save("working-token")
+            let api = makeAPI(tokens: tokens) { _ in
+                (200, [:], #"[{"id":"project-1","name":"Album"}]"#)
+            }
+            let ownership = StubOwnershipReader(ownerID: "account-a")
+            let authority = ProjectCredentialAuthority(tokens: tokens, api: api, ownership: ownership)
+            authority.activate(accountID: "account-a", generation: 1)
+            await waitUntil { authority.verifiedCredential() != nil }
+            let credential = try #require(authority.verifiedCredential())
+            let context = MutationContext(
+                operationID: UUID(), sessionGeneration: credential.sessionGeneration,
+                accountID: credential.accountID, credentialRevision: credential.credentialRevision)
+            let uploader = CredentialQueueUploader()
+            let coordinator = ProjectCreationCoordinator(
+                api: CredentialCreationAPI(), web: CredentialCreationWeb(),
+                uploader: uploader, credentials: authority)
+            let files = ["First.wav", "Second.wav", "Third.wav"].map {
+                URL(fileURLWithPath: "/tmp/" + $0)
+            }
+            await coordinator.create(name: "Album", files: files)
+            await waitUntil { uploader.isGated }
+            #expect(uploader.isGated)
+
+            ownership.gateNextRead = true
+            let saving = Task { try await authority.saveCandidate("candidate-token") }
+            await waitUntil { ownership.isGated }
+            #expect(ownership.isGated)
+            #expect(authority.isCurrent(context))
+            #expect(authority.verifiedCredential()?.token == "working-token")
+            #expect(try tokens.read() == "working-token")
+
+            // Finish one file while candidate validation is suspended. The queue
+            // must advance under its captured, still-active credential.
+            uploader.releaseUpload()
+            await waitUntil { uploader.calls.count == 2 && uploader.isGated }
+            #expect(uploader.calls == ["First.wav", "Second.wav"])
+            #expect(coordinator.initialFiles[0].status == .uploaded(boxID: "box-1"))
+            ownership.ownerID = acceptsCandidate ? "account-a" : "other-account"
+            ownership.releaseRead()
+            if acceptsCandidate {
+                try await saving.value
+                #expect(!authority.isCurrent(context))
+                #expect(authority.verifiedCredential()?.token == "candidate-token")
+            } else {
+                await #expect(throws: ProjectCredentialError.self) { try await saving.value }
+                #expect(authority.isCurrent(context))
+                #expect(authority.verifiedCredential()?.token == "working-token")
+            }
+
+            uploader.releaseUpload()
+            if acceptsCandidate {
+                await waitUntil { !coordinator.isUploadingInitialFiles }
+                #expect(uploader.calls == ["First.wav", "Second.wav"])
+                #expect(coordinator.initialFiles[1].isRetryable)
+                #expect(coordinator.initialFiles[2].isRetryable)
+            } else {
+                await waitUntil { uploader.calls.count == 3 && uploader.isGated }
+                #expect(uploader.calls == ["First.wav", "Second.wav", "Third.wav"])
+                uploader.releaseUpload()
+                await waitUntil { !coordinator.isUploadingInitialFiles }
+                #expect(coordinator.initialFiles.allSatisfy {
+                    if case .uploaded = $0.status { return true }
+                    return false
+                })
+            }
+        }
+    }
+
     @Test func removalDuringCandidateValidationDoesNotResurrectTheToken() async throws {
         let tokens = MemoryTokenStore()
         let api = makeAPI(tokens: tokens) { _ in
@@ -235,6 +306,55 @@ struct ProjectCredentialTests {
         #expect(try tokens.read() == nil)
         #expect(authority.verifiedCredential() == nil)
         #expect(authority.state == .absent)
+    }
+}
+
+@MainActor
+private final class CredentialCreationAPI: ProjectCreatingAPI {
+    func createProject(name: String,
+                       credential: VerifiedProjectCredential) async throws -> SamplyProject {
+        SamplyProject(id: "project-1", name: name, artwork: nil, timeModified: nil,
+                      playerUrl: nil, creator: SamplyProjectCreator(uid: credential.accountID))
+    }
+}
+
+@MainActor
+private final class CredentialCreationWeb: ProjectCreationWebSession {
+    let accountID: String? = "account-a"
+    let isSigningOut = false
+
+    func call<T: Decodable>(_ command: String, arguments: [String: Any]) async throws -> T {
+        // Library propagation is independent of the queue in this fixture.
+        throw URLError(.cannotConnectToHost)
+    }
+}
+
+@MainActor
+private final class CredentialQueueUploader: ProjectAssetUploading {
+    private(set) var calls: [String] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+    var isGated: Bool { continuation != nil }
+
+    func performUpload(file: URL, projectID: String, parentID: String?,
+                       authorization: UploadAuthorization,
+                       progress: @escaping @MainActor @Sendable (Double) -> Void) async -> UploadOutcome {
+        calls.append(file.lastPathComponent)
+        await withCheckedContinuation { continuation = $0 }
+        guard authorization.isCurrent else { return .cancelled(.waiting) }
+        return .submitted(UploadTicketIdentity(
+            boxID: "box-\(calls.count)", projectID: projectID,
+            fileName: file.lastPathComponent, kind: .originalFile))
+    }
+
+    func performArtworkUpload(payload: ProjectArtworkPayload, projectID: String,
+                              authorization: UploadAuthorization) async -> UploadOutcome {
+        Issue.record("The credential queue regression must not submit artwork")
+        return .cancelled(.waiting)
+    }
+
+    func releaseUpload() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 
