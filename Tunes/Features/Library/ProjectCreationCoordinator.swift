@@ -227,13 +227,13 @@ final class ProjectCreationCoordinator {
         return !isBackgroundWorkRunning && !hasUnresolvedCreatedWork
     }
 
-    /// Local abandonment is deliberate and safe only after the confirmed project
-    /// has appeared in Library and no refresh/open recovery is still pending.
+    /// Local abandonment is deliberate after Library visibility, or after the
+    /// user acknowledges a quarantined result whose identity remains unresolved.
     var canAbandonConfirmedCreation: Bool {
         guard case .created(_, let stage) = state, !isBackgroundWorkRunning else { return false }
         switch stage {
-        case .visible, .opened, .openFailed: return true
-        case .refreshing, .opening, .delayed, .refreshFailed, .quarantined: return false
+        case .visible, .opened, .openFailed, .quarantined: return true
+        case .refreshing, .opening, .delayed, .refreshFailed: return false
         }
     }
 
@@ -471,8 +471,8 @@ final class ProjectCreationCoordinator {
     /// Used by the post-creation file step.
     @discardableResult
     func addFiles(_ urls: [URL]) -> Bool {
-        guard !urls.isEmpty, case .created(let created, let stage) = state,
-              !stage.isBusy, !isQuarantined, !isUploadingInitialFiles,
+        guard !urls.isEmpty, case .created(let created, _) = state,
+              !isQuarantined, !isUploadingInitialFiles,
               isCurrentAccount(created.accountID),
               let credential = credentials.verifiedCredential(),
               credential.accountID == created.accountID else { return false }
@@ -491,8 +491,8 @@ final class ProjectCreationCoordinator {
     }
 
     /// Abandons local tracking of a confirmed project without deleting or
-    /// recreating anything in Samply. Used when the confirmed project has
-    /// appeared in Library and no recovery is pending.
+    /// recreating anything in Samply. Also allows explicit acknowledgement of
+    /// quarantine without claiming the project's identity has been resolved.
     func discardConfirmedCreation() {
         guard canAbandonConfirmedCreation else { return }
         invalidate()

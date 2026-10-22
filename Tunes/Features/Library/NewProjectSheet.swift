@@ -399,15 +399,23 @@ struct NewProjectSheet: View {
             }
 
             if creation.canAbandonConfirmedCreation {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("This project remains in Samply.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Start New Project") {
-                        startNewProject()
+                if creation.isQuarantined {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Acknowledge this unresolved result and stop tracking it locally. The project may remain in Samply.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Acknowledge and Stop Tracking") { startNewProject() }
+                            .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
+                } else {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("This project remains in Samply.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Start New Project") { startNewProject() }
+                            .buttonStyle(.bordered)
+                    }
                 }
             }
         }

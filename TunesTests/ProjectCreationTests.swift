@@ -434,7 +434,7 @@ struct ProjectCreationTests {
         #expect(notice?.canStartNewProject == false)
     }
 
-    @Test func libraryNoticeNamesQuarantineAndDoesNotOfferOpening() async {
+    @Test func libraryNoticeNamesQuarantineAndOffersOnlyReadOrAbandonmentActions() async {
         let coordinator = makeCoordinator(
             api: StubProjectAPI(result: .success(project(creatorUID: "other-account"))),
             web: StubCreationWeb(libraryResponses: [.success(snapshot())]))
@@ -444,7 +444,7 @@ struct ProjectCreationTests {
         #expect(notice?.message.contains("may exist") == true)
         #expect(notice?.canRefreshLibrary == true)
         #expect(notice?.canOpenProject == false)
-        #expect(notice?.canStartNewProject == false)
+        #expect(notice?.canStartNewProject == true)
     }
 
     @Test func accountChangeBeforeArtworkSubmissionPreventsSubmission() async {
@@ -719,9 +719,13 @@ struct ProjectCreationTests {
         uploader.artworkResults = [
             .submitted(ticket(boxID: "art-box", kind: .artwork, fileName: "Cover.jpg"))
         ]
+        let api = StubProjectAPI(result: .success(project()))
         let coordinator = makeCoordinator(
-            api: StubProjectAPI(result: .success(project())),
-            web: StubCreationWeb(libraryResponses: [.success(snapshot(library: [libraryItem()]))]),
+            api: api,
+            web: StubCreationWeb(libraryResponses: [
+                .success(snapshot(library: [libraryItem()])),
+                .success(snapshot(library: [libraryItem()]))
+            ]),
             uploader: uploader)
 
         await coordinator.create(name: "Album", artwork: artworkPayload())
@@ -734,6 +738,18 @@ struct ProjectCreationTests {
         #expect(coordinator.hasUnresolvedArtwork)
         #expect(!coordinator.canRetryArtwork)
         #expect(!coordinator.canFinishCreatedProject)
+        await coordinator.refreshLibrary()
+        coordinator.sheetDidDisappear()
+        coordinator.prepareForPresentation()
+        coordinator.reset()
+        #expect(coordinator.artworkState == .submitted(boxID: "art-box"))
+        #expect(coordinator.createdProject != nil)
+        #expect(coordinator.canAbandonConfirmedCreation)
+        coordinator.discardConfirmedCreation()
+        #expect(coordinator.state == .idle)
+        #expect(coordinator.artworkState == .none)
+        #expect(api.names == ["Album"])
+        #expect(uploader.artworkCalls == 1)
     }
 
     @Test func artworkFailureBeforeSubmissionIsRetryableWithoutAnotherCreate() async {
@@ -772,6 +788,112 @@ struct ProjectCreationTests {
             from: URL(string: "http://samply.app/p/share-new")!) == nil)
         #expect(ProjectCreationCoordinator.routeID(
             from: URL(string: "https://samply.app/library/share-new")!) == nil)
+    }
+
+    @Test func filesCanStartWhileInitialLibraryRefreshIsGated() async throws {
+        let file = try temporaryFile("DuringRefresh.wav")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let web = StubCreationWeb(libraryResponses: [.success(snapshot(library: [libraryItem()]))])
+        web.gateNextRefresh()
+        let api = StubProjectAPI(result: .success(project()))
+        let uploader = StubAssetUploader()
+        uploader.gateNextUpload = true
+        let credentials = StubCredentials()
+        let coordinator = makeCoordinator(api: api, web: web, uploader: uploader,
+                                          credentials: credentials)
+        let creating = Task { await coordinator.create(name: "Album") }
+        await waitUntil { web.isRefreshGated }
+        #expect(web.isRefreshGated)
+        #expect(coordinator.createdStage == .refreshing)
+
+        #expect(coordinator.addFiles([file]))
+        await waitUntil { uploader.isUploadGated }
+        #expect(uploader.isUploadGated)
+        #expect(!coordinator.addFiles([file]))
+        uploader.releaseUpload()
+        await waitUntil { !coordinator.isUploadingInitialFiles }
+        #expect(coordinator.initialFiles.first?.status == .uploaded(boxID: "box-1"))
+        #expect(coordinator.createdStage == .refreshing)
+        #expect(web.isRefreshGated)
+
+        credentials.isVerified = false
+        #expect(!coordinator.addFiles([URL(fileURLWithPath: "/tmp/blocked.wav")]))
+        credentials.isVerified = true
+        credentials.accountID = "account-b"
+        #expect(!coordinator.addFiles([URL(fileURLWithPath: "/tmp/blocked.wav")]))
+        web.releaseRefresh()
+        await creating.value
+        #expect(api.names == ["Album"])
+        #expect(coordinator.createdStage == .visible)
+        #expect(uploader.calls == ["DuringRefresh.wav"])
+    }
+
+    @Test func tokenReplacementLeavesNeverSubmittedFilesRetryable() async throws {
+        let files = [try temporaryFile("First.wav"), try temporaryFile("Waiting.wav")]
+        defer { files.forEach { try? FileManager.default.removeItem(at: $0) } }
+        let credentials = StubCredentials()
+        let uploader = StubAssetUploader()
+        uploader.gateNextUpload = true
+        let api = StubProjectAPI(result: .success(project()))
+        let coordinator = makeCoordinator(
+            api: api, web: StubCreationWeb(libraryResponses: [.success(snapshot())]),
+            uploader: uploader, credentials: credentials)
+        await coordinator.create(name: "Album", files: files)
+        await waitUntil { uploader.isUploadGated }
+        #expect(uploader.isUploadGated)
+
+        // Exercise revision invalidation without relying on the backend's
+        // additional cancellation notification.
+        credentials.replaceToken("replacement-token")
+        uploader.releaseUpload()
+        await waitUntil { !coordinator.isUploadingInitialFiles }
+        #expect(uploader.calls == ["First.wav"])
+        #expect(coordinator.initialFiles.allSatisfy(\.isRetryable))
+        #expect(coordinator.canRetryInitialFiles)
+
+        coordinator.retryFailedInitialFiles()
+        await waitUntil { !coordinator.isUploadingInitialFiles }
+        #expect(uploader.calls == ["First.wav", "First.wav", "Waiting.wav"])
+        #expect(coordinator.initialFiles.allSatisfy {
+            if case .uploaded = $0.status { return true }
+            return false
+        })
+        #expect(api.names == ["Album"])
+    }
+
+    @Test func quarantineRequiresExplicitAcknowledgementAndNeverRepeatsCreation() async {
+        for creator in [String?.none, "other-account"] {
+            for appearsInLibrary in [false, true] {
+                let api = StubProjectAPI(result: .success(project(creatorUID: creator)))
+                let uploader = StubAssetUploader()
+                let web = StubCreationWeb(libraryResponses: [
+                    .success(snapshot(library: appearsInLibrary ? [libraryItem()] : []))
+                ])
+                let coordinator = makeCoordinator(api: api, web: web, uploader: uploader)
+                await coordinator.create(name: "Album")
+                coordinator.sheetDidDisappear()
+                coordinator.prepareForPresentation()
+                coordinator.reset()
+                #expect(coordinator.isQuarantined)
+                #expect(coordinator.canAbandonConfirmedCreation)
+                #expect(!coordinator.addFiles([URL(fileURLWithPath: "/tmp/blocked.wav")]))
+                await coordinator.refreshLibrary()
+                #expect(coordinator.isQuarantined)
+                #expect(coordinator.hasAppearedInLibrary == appearsInLibrary)
+                #expect(!coordinator.canOpenCreatedProject)
+                #expect(!coordinator.canRetryArtwork)
+                #expect(!coordinator.canRetryInitialFiles)
+                await coordinator.create(name: "Must not repeat")
+                #expect(api.names == ["Album"])
+
+                coordinator.discardConfirmedCreation()
+                #expect(coordinator.state == .idle)
+                #expect(api.names == ["Album"])
+                #expect(uploader.calls.isEmpty)
+                #expect(uploader.artworkCalls == 0)
+                #expect(web.calls.map(\.command) == ["refreshPage"])
+            }
+        }
     }
 
     private func makeCoordinator(api: any ProjectCreatingAPI,
