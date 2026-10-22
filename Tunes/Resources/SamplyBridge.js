@@ -223,15 +223,39 @@
         const id = args.routeID;
         if (typeof id !== 'string' || !id.length) throw operationError('Missing player identity.');
         const query = args.groupID ? {group: args.groupID} : {};
+        // Documented external player links can carry the share identity in the
+        // token query while the path carries a player/project identity. The web
+        // player resolves that link and replaces the path with the live share ID.
+        if (typeof args.token === 'string' && args.token.length) query.token = args.token;
         await globals().$router.push({path: '/p/' + encodeURIComponent(id), query});
         await waitFor(() => {
             const p = store('player'), b = store('boxes');
-            return globals().$router.currentRoute.value.params.shareid === id && p?.shareid === id &&
-                p?.playerDocumentData && p.playerBoxesLoading === false && b?.loadingBoxes === false &&
-                Array.isArray(b.boxViewModelsCurrentLevel) &&
+            return globals().$router.currentRoute.value.params.shareid === p?.shareid &&
+                !!p?.shareid && p?.playerDocumentData && p.playerBoxesLoading === false &&
+                b?.loadingBoxes === false && Array.isArray(b.boxViewModelsCurrentLevel) &&
                 (args.groupID ? b.currentLevelId === args.groupID : !b.currentLevelId);
         }, ticket);
+        const player = store('player');
+        if (typeof args.projectID === 'string' && args.projectID &&
+            player?.parentProjectID !== args.projectID) {
+            throw operationError('The opened player did not match the selected project identity.');
+        }
         return snapshot();
+    }
+    async function projectOwnership(args) {
+        assertAccount();
+        const uid = account().uid;
+        const projectID = text(args.projectID);
+        if (!projectID || projectID.includes('/') || projectID.includes('\\'))
+            throw operationError('Missing project identity.');
+        const api = await dataAPI();
+        if (typeof api.dW !== 'function' || typeof api.aJ !== 'function' || typeof api.a9 !== 'function')
+            throw operationError('This Samply web build does not expose the authorized project read.');
+        const snapshot = await withDeadline(api.dW(api.aJ(api.a9(), api.a7.PROJECTS, projectID)));
+        if (account()?.uid !== uid) throw operationError('The Samply account changed during the project read.');
+        if (!snapshot.exists()) return {accountID: uid, projectID, exists: false, ownerID: undefined};
+        const data = snapshot.data() || {};
+        return {accountID: uid, projectID, exists: true, ownerID: text(data.owner)};
     }
     async function playBox(args) {
         assertAccount();
@@ -278,6 +302,7 @@
             return true;
         }
         if (name === 'browse') return await browse(args);
+        if (name === 'projectOwnership') return await projectOwnership(args);
         if (name === 'playBox') return await playBox(args);
         if (name === 'versions') {
             const b = requireStore('boxes', ['getBoxVersions']);

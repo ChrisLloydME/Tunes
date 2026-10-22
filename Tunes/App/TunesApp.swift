@@ -2,6 +2,9 @@ import SwiftUI
 
 @main
 struct TunesApp: App {
+    #if DEBUG
+    @Environment(\.openWindow) private var openWindow
+    #endif
     @State private var backend = SamplyBackend()
     @FocusedValue(\.samplyPage) private var currentPage
 
@@ -12,6 +15,11 @@ struct TunesApp: App {
         .defaultSize(width: 1100, height: 760)
         .commands {
             AboutTunesCommands()
+            #if DEBUG
+            CommandMenu("Debug") {
+                Button("Review Error UI…") { openWindow(id: "error-ui-review") }
+            }
+            #endif
             CommandMenu("Samply") {
                 Button("Open in Samply") { Task { await backend.openInSamply(currentPage ?? .library) } }
                     .keyboardShortcut("l", modifiers: [.command, .shift])
@@ -30,6 +38,14 @@ struct TunesApp: App {
         .defaultPosition(.center)
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+        #if DEBUG
+        Window("Error UI Review", id: "error-ui-review") {
+            ProjectErrorReviewView(backend: backend)
+        }
+        .defaultSize(width: 1000, height: 760)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+        #endif
         Settings { ConnectionView(backend: backend) }
     }
 }

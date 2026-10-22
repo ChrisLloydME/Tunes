@@ -24,8 +24,8 @@ struct ConnectionView: View {
             .tabItem { Label("Account", systemImage: "person.crop.circle") }
 
             settingsPage(
-                title: "Upload Settings",
-                detail: "Connect a personal access token to upload original files."
+                title: "API Access",
+                detail: "Connect a personal access token to create projects and upload artwork or original files. Tunes verifies that the token belongs to the signed-in Samply account before enabling writes."
             ) {
                 tokenSection
                 ConnectionSettingsSection(title: "Token Storage") {
@@ -46,7 +46,7 @@ struct ConnectionView: View {
                         .accessibilityLabel(message)
                 }
             }
-            .tabItem { Label("Uploads", systemImage: "arrow.up.circle") }
+            .tabItem { Label("API Access", systemImage: "key") }
         }
         .frame(width: 700, height: 560)
         .disabled(isSaving || backend.web.isSigningOut)
@@ -102,7 +102,7 @@ struct ConnectionView: View {
                 ConnectionSettingsDivider()
                 ConnectionSettingsRow(
                     title: "Sign Out",
-                    detail: "Stop playback and remove this app's session and upload token.",
+                    detail: "Stop playback and remove this app's session and personal access token.",
                     systemImage: "rectangle.portrait.and.arrow.right"
                 ) {
                     Button("Sign Out", role: .destructive) { signOut() }
@@ -136,10 +136,8 @@ struct ConnectionView: View {
     private var tokenSection: some View {
         ConnectionSettingsSection(title: "Personal Access Token") {
             ConnectionSettingsRow(
-                title: backend.hasToken ? "Token Added" : "Optional Upload Access",
-                detail: backend.hasToken
-                    ? "A verified token is saved on this Mac."
-                    : "Sign in, then add a token from the same Samply account.",
+                title: backend.hasToken ? "Token Added" : "Optional API Access",
+                detail: credentialDetail,
                 systemImage: "key"
             ) {
                 Button("Create Token") { backend.web.openTokenPreferences() }
@@ -179,6 +177,21 @@ struct ConnectionView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var credentialDetail: String {
+        switch backend.credentialState {
+        case .absent:
+            return "Sign in, then add a token from the same Samply account."
+        case .validating:
+            return "Verifying this token against the signed-in account…"
+        case .verified:
+            return "A verified token is saved on this Mac."
+        case .rejected(let message):
+            return message
+        case .identityUnverifiable(let message):
+            return message
         }
     }
 

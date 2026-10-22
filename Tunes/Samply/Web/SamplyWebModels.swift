@@ -79,8 +79,16 @@ struct WebSnapshot: Codable, Sendable {
 }
 
 extension WebSnapshot {
-    func hasLoadedBoxes(for item: LibraryItem, groupID: String?) -> Bool {
+    func hasLoadedBoxes(for item: LibraryItem, groupID: String?,
+                        expectedProjectID: String? = nil) -> Bool {
+        hasLoadedBoxes(routeID: item.routeID, groupID: groupID,
+                       expectedProjectID: expectedProjectID ?? item.projectID)
+    }
+
+    func hasLoadedBoxes(routeID: String, groupID: String?,
+                        expectedProjectID: String?) -> Bool {
         authenticationState == .signedIn && boxesReady &&
-            routeID == item.routeID && levelID == groupID
+            self.routeID == routeID && levelID == groupID &&
+            (expectedProjectID == nil || projectID == expectedProjectID)
     }
 }

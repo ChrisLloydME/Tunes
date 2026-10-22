@@ -41,13 +41,19 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
     const router = {currentRoute: {value: {params: {shareid: 'share-1'}}},
         async push(route) {
             calls.push(['navigate', route]);
-            const shareid = decodeURIComponent(route.path.split('/').pop());
-            this.currentRoute.value.path = route.path;
+            // The player view resolves a token-bearing external link to the live
+            // share route and removes the token from the URL.
+            const token = route.query?.token;
+            const shareid = token ? 'share-1' : decodeURIComponent(route.path.split('/').pop());
+            const {token: _discarded, ...query} = route.query ?? {};
+            this.currentRoute.value.path = token ? `/p/${shareid}` : route.path;
             this.currentRoute.value.params.shareid = shareid;
-            this.currentRoute.value.query = route.query;
-            player.shareid = shareid; boxes.currentLevelId = route.query?.group;
+            this.currentRoute.value.query = query;
+            player.shareid = shareid; boxes.currentLevelId = query.group;
         }};
-    const server = {library: [], boxes: []};
+    const server = {library: [], boxes: [], projectDocs: {
+        'project-1': {owner: 'user-a', roles: {'user-a': {role: 'admin'}}, artwork: undefined}
+    }};
     const dataAPI = {
         a9: () => ({}), a7: {USERS: 'users', HISTORY: 'history', PROJECTS: 'projects', BOXES: 'boxes'},
         a6: (_db, ...path) => ({path}), a3: (collection, filter) => ({...collection, filter}),
@@ -56,11 +62,16 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
             calls.push(['serverRead', query]);
             return {docs: query.path[0] === 'users' ? server.library : server.boxes};
         },
+        async dW(ref) {
+            calls.push(['serverDoc', ref]);
+            const data = server.projectDocs[ref.path.at(-1)];
+            return {exists: () => data !== undefined, data: () => data};
+        },
         at: () => ({async getSecurePlayerBoxContent(args) {
             calls.push(['sharedRead', args]); return {boxes: server.boxes.map(doc => ({id: doc.id, data: doc.data()}))};
         }})
     };
-    const context = {location: {origin}, URL, setTimeout, clearTimeout,
+    const context = {location: {origin}, URL, setTimeout, clearTimeout, File, atob,
         // Replace only the module-loading boundary; all adapter behavior runs unchanged.
         __fixtureImport: async () => dataAPI,
         document: {querySelector(selector) {
@@ -324,6 +335,65 @@ test('does not publish stale boxes during a player route transition', async () =
     const f = fixture(); f.player.shareid = 'previous-share';
     const snapshot = await f.bridge.command('snapshot');
     assert.equal(snapshot.boxesReady, false); assert.equal(snapshot.boxes.length, 0);
+});
+
+test('opens an empty project through a tokenized player URL with matching project identity', async () => {
+    const f = fixture();
+    f.boxes.boxViewModelsCurrentLevel = [];
+    const snapshot = await f.bridge.command('browse', {
+        routeID: 'project-1', token: 'share-1', projectID: 'project-1'
+    });
+    assert.equal(snapshot.boxesReady, true);
+    assert.deepEqual(plain(snapshot.boxes), []);
+    assert.equal(snapshot.projectID, 'project-1');
+    assert.equal(snapshot.routeID, 'share-1');
+    assert.deepEqual(plain(f.calls), [['navigate', {
+        path: '/p/project-1', query: {token: 'share-1'}
+    }]]);
+});
+
+test('rejects a loaded player whose project identity differs from the requested project', async () => {
+    const f = fixture();
+    f.player.parentProjectID = 'project-other';
+    await assert.rejects(f.bridge.command('browse', {
+        routeID: 'project-1', token: 'share-1', projectID: 'project-1'
+    }), /did not match/);
+});
+
+test('proves project ownership through the authenticated web project read', async () => {
+    const f = fixture();
+    const result = await f.bridge.command('projectOwnership', {projectID: 'project-1'});
+    assert.deepEqual(plain(result), {
+        accountID: 'user-a', projectID: 'project-1', exists: true, ownerID: 'user-a'
+    });
+    assert.deepEqual(f.calls.filter(call => call[0] === 'serverDoc'), [
+        ['serverDoc', {path: ['projects', 'project-1']}]
+    ]);
+    assert.equal(f.calls.some(call => call[0] === 'navigate'), false);
+});
+
+test('reports missing project ownership without inventing an owner', async () => {
+    const f = fixture();
+    const result = await f.bridge.command('projectOwnership', {projectID: 'missing'});
+    assert.deepEqual(plain(result), {
+        accountID: 'user-a', projectID: 'missing', exists: false
+    });
+});
+
+test('project ownership read requires a signed-in account', async () => {
+    const f = fixture({anonymous: true});
+    await assert.rejects(f.bridge.command('projectOwnership', {projectID: 'project-1'}),
+        error => error.code === 'TUNES_OPERATION_FAILED');
+    assert.equal(f.calls.some(call => call[0] === 'serverDoc'), false);
+});
+
+test('does not expose an artwork mutation command after migrating to REST', async () => {
+    const f = fixture();
+    await assert.rejects(f.bridge.command('setProjectArtwork', {
+        projectID: 'project-1', fileName: 'cover.jpg', mimeType: 'image/jpeg',
+        dataBase64: Buffer.from([1, 2, 3]).toString('base64')
+    }), /Unsupported Tunes command/);
+    assert.equal(f.calls.some(call => call[0] === 'uploadArtwork'), false);
 });
 
 test('does not report unloaded view models or the previous folder as an empty album', async () => {

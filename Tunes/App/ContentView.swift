@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @Bindable var backend: SamplyBackend
     @State private var showConnection = false
+    @State private var showNewProject = false
     @State private var showsProject = false
     @State private var showsIssueDetails = false
 
@@ -91,23 +92,30 @@ struct ContentView: View {
                         .disabled(backend.isPlayingSelection)
                     }
                 }
+                ToolbarItem {
+                    if !showsProject {
+                        Button { showNewProject = true } label: {
+                            ToolbarControlIcon(title: "New Project", systemImage: "plus",
+                                               weight: .semibold)
+                        }
+                        .help("New Project")
+                        .accessibilityLabel("New Project")
+                        .accessibilityIdentifier("newProject")
+                        .disabled(!backend.isConnected || backend.projectCreation.isCreating)
+                    }
+                }
                 ToolbarItemGroup {
                     Button { Task { await backend.refresh(currentPage) } } label: {
-                        Label(currentPage.refreshLabel, systemImage: "arrow.clockwise")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 20, weight: .semibold))
-                            .imageScale(.small)
-                            .frame(width: 24, height: 24)
+                        ToolbarControlIcon(title: currentPage.refreshLabel,
+                                           systemImage: "arrow.clockwise",
+                                           weight: .semibold)
                     }
                     .help(currentPage.refreshLabel)
                     .accessibilityLabel(currentPage.refreshLabel)
                     .disabled(!backend.isConnected || backend.isRefreshing || backend.isBrowsing || backend.isPlayingSelection || backend.isOpeningSamply)
                     Button { Task { await backend.openInSamply(currentPage) } } label: {
-                        Label("Open in Samply", systemImage: "arrow.up.forward.app")
-                            .labelStyle(.iconOnly)
-                            .font(.system(size: 20, weight: .medium))
-                            .imageScale(.medium)
-                            .frame(width: 24, height: 24)
+                        ToolbarControlIcon(title: "Open in Samply",
+                                           systemImage: "arrow.up.forward.app")
                     }
                     .help("Open in Samply")
                     .accessibilityLabel("Open in Samply")
@@ -117,6 +125,9 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showConnection) { ConnectionView(backend: backend) }
+        .sheet(isPresented: $showNewProject) {
+            NewProjectSheet(backend: backend) { showsProject = false }
+        }
         .focusedSceneValue(\.samplyPage, currentPage)
         .frame(minWidth: 860, minHeight: 560)
         .task { backend.start() }
@@ -136,7 +147,7 @@ struct ContentView: View {
             if value == nil { showsIssueDetails = false }
         }
         .onChange(of: backend.selectedItem?.id) { _, id in
-            if id == nil { showsProject = false }
+            showsProject = id != nil
         }
     }
 
@@ -175,15 +186,26 @@ struct ContentView: View {
             .defaultScrollAnchor(.center)
         } else if showsProject, let item = backend.selectedItem {
             AlbumDetailView(backend: backend, item: item) {
-                if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
+                if backend.isCredentialVerified { backend.chooseUpload() } else { showConnection = true }
             }
         } else if !backend.libraryReady {
             ProgressView("Loading your Samply library…")
         } else {
-            LibraryView(items: backend.library, isOpeningProject: backend.isPlayingSelection) { item in
-                backend.select(item)
-                showsProject = true
-            }
+            LibraryView(
+                items: backend.library,
+                isOpeningProject: backend.isPlayingSelection,
+                creationNotice: backend.projectCreationNotice,
+                retryProjectUploads: backend.retryProjectUploads,
+                retryProjectArtwork: backend.retryProjectArtwork,
+                refreshProjectLibrary: { Task { await backend.refreshCreatedProject() } },
+                openCreatedProject: { Task { await backend.openCreatedProject() } },
+                startNewProject: backend.abandonCreatedProject,
+                dismissCreationNotice: backend.dismissProjectCreationNotice,
+                openProject: { item in
+                    backend.select(item)
+                    showsProject = true
+                }
+            )
         }
     }
 
@@ -203,9 +225,28 @@ struct ContentView: View {
                 .font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding()
         case .cancelled:
             Text("Upload cancelled").font(.caption).padding()
+        case .uncertain(let message):
+            Text(message).font(.caption).textSelection(.enabled).padding()
         case .failed(let error):
             Text("Upload failed: \(error)").font(.caption).textSelection(.enabled).padding()
         }
     }
 
+}
+
+private struct ToolbarControlIcon: View {
+    let title: String
+    let systemImage: String
+    var pointSize: CGFloat = 15
+    var weight: Font.Weight = .medium
+    var scale: Image.Scale = .medium
+
+    var body: some View {
+        Label(title, systemImage: systemImage)
+            .labelStyle(.iconOnly)
+            .font(.system(size: pointSize, weight: weight))
+            .imageScale(scale)
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+    }
 }

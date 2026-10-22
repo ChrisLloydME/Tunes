@@ -2,7 +2,7 @@
 
 Tunes is a native macOS client for browsing albums and listening to music from Samply. SwiftUI and AppKit provide the Library, album pages, and playback controls, while a persistent WKWebView uses Samply's own authentication and streaming player.
 
-**Status: the connection layer and native interface are implemented. Email sign-in has been manually verified by the user. Playback, seeking, shared content, and uploads still need manual verification. Official authorization through the default browser is not yet available.**
+**Status: the connection layer and native interface are implemented. Email sign-in has been manually verified by the user. Playback, seeking, shared content, project creation with artwork and uploaded files, and uploads still need manual verification. Official authorization through the default browser is not yet available.**
 
 ## Run
 
@@ -41,9 +41,13 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Track selection and streaming through Samply's own `audio-module.loadBox`, with play, pause, seek, volume, and previous/next controls.
 - AAC and lossless options, with format and availability determined by Samply; quality changes preserve playback position.
 - macOS Now Playing integration and media keys.
-- Official REST integration for owned projects, project files, folders, stacks, signed download URL queries, and original-file upload tickets.
-- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states.
+- Official REST integration for project creation, owned projects, project files, folders, stacks, signed download URL queries, and artwork/original-file upload tickets.
+- Native project creation from Library using the documented `POST /projects` request, with optional artwork and optional files added after creation, followed by an automatic complete web Library refresh. The creation sheet returns to Library without opening the new project.
+- Project artwork selection from Files or Photos with local validation and downsampling, uploaded through the documented `POST /projects/:projectid/artwork` ticket and storage PUT with `x-goog-meta-writeback`. Tunes reports submitted bytes as confirmation pending because no documented read proves which box became the artwork.
+- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file phases and uncertainty, surfaced in the sheet or a Library notice. Cancellation before submission is retryable; a ticket or PUT that may have reached Samply is not blindly retried.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
+
+Project creation currently requires at least one owned project to establish that the PAT belongs to the signed-in web account. Accounts with no owned projects must create their first project on Samply's website before verifying the PAT in Tunes. A successful artwork PUT remains “submitted; confirmation pending” until local tracking is explicitly abandoned; Library refresh cannot prove artwork assignment. Abandoning tracking does not delete remote content. Quarantined creation results can be explicitly acknowledged and abandoned without repeating creation or allowing optional writes.
 
 ## Local signing
 
@@ -68,4 +72,4 @@ xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \
 node --test Scripts/test-samply-bridge.mjs
 ```
 
-Tests use fixture credentials in memory or temporary directories, plus simulated network and web objects. They do not sign in to real accounts or upload files to cloud storage. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.
+Tests use fixture credentials in memory or temporary directories, plus simulated network and web objects. They do not sign in to real accounts, create real Samply projects, assign live artwork, or upload files to cloud storage. Hosted unit tests cover credential identity, creation quarantine, operation lifetimes, upload phases, artwork timeouts, and Library recovery. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.

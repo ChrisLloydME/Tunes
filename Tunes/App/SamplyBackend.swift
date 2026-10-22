@@ -2,6 +2,16 @@ import AppKit
 import Foundation
 import Observation
 
+struct ProjectCreationNotice: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+    let canRetryUploads: Bool
+    let canRetryArtwork: Bool
+    let canRefreshLibrary: Bool
+    let canOpenProject: Bool
+    let canStartNewProject: Bool
+}
+
 /// Composition root for the current web-session and REST integration.
 @MainActor
 @Observable
@@ -10,6 +20,8 @@ final class SamplyBackend {
     let api: SamplyAPI
     let playback: PlaybackController
     let uploader: SamplyUploader
+    let credentials: ProjectCredentialAuthority
+    let projectCreation: ProjectCreationCoordinator
     private(set) var library: [LibraryItem] = []
     private(set) var boxes: [WebBox] = []
     private(set) var selectedItem: LibraryItem?
@@ -19,14 +31,15 @@ final class SamplyBackend {
     private(set) var isPlayingSelection = false
     private(set) var isRefreshing = false
     private(set) var isOpeningSamply = false
-    private(set) var hasToken = false
     private(set) var error: String?
     private(set) var hasTransientError = false
+    private(set) var projectCreationNotice: ProjectCreationNotice?
     @ObservationIgnored private let tokens: any TokenStore
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var browseTask: Task<Void, Never>?
     @ObservationIgnored private var playTask: Task<Void, Never>?
     @ObservationIgnored private var selectionGeneration = 0
+    @ObservationIgnored private var sessionGeneration: UInt64 = 0
     @ObservationIgnored private var accountID: String?
     @ObservationIgnored private var hasResolvedTokenAccount = false
 
@@ -39,13 +52,27 @@ final class SamplyBackend {
         self.api = api
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
-        do { hasToken = try tokens.read() != nil }
-        catch { recordFailure(error) }
+        let credentials = ProjectCredentialAuthority(tokens: tokens, api: api, ownership: web)
+        self.credentials = credentials
+        projectCreation = ProjectCreationCoordinator(api: api, web: web, uploader: uploader,
+                                                     credentials: credentials)
+        projectCreation.onLibraryRefreshed = { [weak self] items in
+            self?.library = items
+        }
+        projectCreation.onProjectOpened = { [weak self] item, snapshot in
+            self?.acceptCreatedProject(item, snapshot)
+        }
+        projectCreation.onBackgroundOutcome = { [weak self] in
+            self?.refreshProjectCreationNotice()
+        }
     }
 
     var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
     var isCheckingSession: Bool { web.authenticationState == .checking }
     var libraryReady: Bool { web.snapshot?.libraryReady == true }
+    var hasToken: Bool { credentials.hasStoredToken }
+    var credentialState: ProjectCredentialState { credentials.state }
+    var isCredentialVerified: Bool { credentials.verifiedCredential() != nil }
 
     func start() {
         // Hosted unit tests must not load an existing real beta account or contact Samply.
@@ -68,16 +95,15 @@ final class SamplyBackend {
         guard let state = web.snapshot, state.authenticationState != .checking else { return }
         let newAccount = state.account?.uid
         if !hasResolvedTokenAccount || newAccount != accountID {
+            sessionGeneration &+= 1
+            projectCreation.invalidate()
             invalidateSelection()
             library = []
             playback.clear()
             uploader.reset()
-            // Restore only after identity resolves; never reuse account A's PAT for B.
-            hasToken = false
-            do {
-                try tokens.restore(for: newAccount)
-                hasToken = try tokens.read() != nil
-            } catch { recordFailure(error) }
+            // Restore and revalidate only after identity resolves; never reuse
+            // account A's PAT for B, and never treat the stored account ID as proof.
+            credentials.activate(accountID: newAccount, generation: sessionGeneration)
             accountID = newAccount
             hasResolvedTokenAccount = true
         }
@@ -85,7 +111,8 @@ final class SamplyBackend {
         if state.libraryReady { library = state.library }
         playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
-           state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id) {
+           state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id,
+                                expectedProjectID: selectedItem.projectID) {
             boxes = state.boxes
             albumLoadState = .loaded
         }
@@ -136,13 +163,18 @@ final class SamplyBackend {
             guard let self else { return }
             do {
                 var args: [String: Any] = ["routeID": item.routeID]
+                if let projectID = item.projectID { args["projectID"] = projectID }
                 if let groupID { args["groupID"] = groupID }
                 let state: WebSnapshot = try await web.call("browse", arguments: args)
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
-                if state.hasLoadedBoxes(for: item, groupID: groupID) {
+                if state.hasLoadedBoxes(for: item, groupID: groupID,
+                                        expectedProjectID: item.projectID) {
                     boxes = state.boxes
                     albumLoadState = .loaded
+                } else {
+                    albumLoadState = .failed
+                    recordFailure(SamplyError.invalidResponse)
                 }
                 isBrowsing = false
             } catch {
@@ -187,27 +219,112 @@ final class SamplyBackend {
 
     func saveToken(_ token: String) async throws {
         guard isConnected, accountID != nil else { throw SamplyError.noAccount }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else { throw SamplyError.invalidToken }
-        // Validate before replacing a working credential. Never retain a rejected token.
-        let account = accountID
-        let generation = selectionGeneration
-        _ = try await api.projects(token: trimmed)
-        guard account == accountID, generation == selectionGeneration, !web.isSigningOut else {
-            throw CancellationError()
-        }
-        try tokens.save(trimmed)
-        hasToken = true
+        try await credentials.saveCandidate(token)
+        // A replacement invalidates every in-flight operation's captured revision.
+        projectCreation.credentialChanged()
+        uploader.reset()
     }
 
     func removeToken() throws {
         uploader.reset()
-        hasToken = false
-        try tokens.remove()
+        projectCreation.credentialChanged()
+        try credentials.remove()
+    }
+
+    func retryProjectUploads() {
+        projectCreation.retryFailedInitialFiles()
+    }
+
+    func retryProjectArtwork() {
+        projectCreation.retryArtwork()
+    }
+
+    func dismissProjectCreationNotice() {
+        projectCreationNotice = nil
+    }
+
+    func refreshCreatedProject() async {
+        await projectCreation.refreshLibrary()
+    }
+
+    func openCreatedProject() async {
+        await projectCreation.openCreatedProject()
+    }
+
+    func abandonCreatedProject() {
+        projectCreation.discardConfirmedCreation()
+        if projectCreation.createdProject == nil {
+            projectCreationNotice = nil
+        }
+    }
+
+    private func refreshProjectCreationNotice() {
+        projectCreationNotice = Self.creationNotice(for: projectCreation)
+    }
+
+    static func creationNotice(for projectCreation: ProjectCreationCoordinator) -> ProjectCreationNotice? {
+        guard let created = projectCreation.createdProject else {
+            return nil
+        }
+        let name = created.project.name
+        var parts: [String] = []
+        let failedFiles = projectCreation.initialFiles.filter {
+            switch $0.status {
+            case .failed(_, true), .cancelled(true, _): return true
+            default: return false
+            }
+        }.count
+        let uncertainFiles = projectCreation.initialFiles.filter {
+            switch $0.status {
+            case .uncertain, .cancelled(false, _), .failed(_, false): return true
+            default: return false
+            }
+        }.count
+        if failedFiles > 0 {
+            parts.append("\(failedFiles) file\(failedFiles == 1 ? "" : "s") from “\(name)” did not upload.")
+        }
+        if uncertainFiles > 0 {
+            parts.append("\(uncertainFiles) upload\(uncertainFiles == 1 ? "" : "s") for “\(name)” could not be confirmed and may already be in the project.")
+        }
+        switch projectCreation.artworkState {
+        case .failed(let message, _):
+            parts.append("Artwork for “\(name)” was not submitted. \(message)")
+        case .submitted:
+            parts.append("Artwork for “\(name)” was submitted; confirmation is pending.")
+        case .unresolved(_, let message):
+            parts.append("Artwork for “\(name)” is unresolved. \(message)")
+        default:
+            break
+        }
+        switch projectCreation.createdStage {
+        case .refreshing:
+            parts.append("“\(name)” was created. Refreshing the complete Library…")
+        case .delayed:
+            parts.append("“\(name)” was created but has not appeared in the Library yet.")
+        case .refreshFailed(let message):
+            parts.append(message)
+        case .quarantined(let message):
+            parts.append(message)
+        case .openFailed(let message):
+            parts.append(message)
+        default:
+            break
+        }
+        guard !parts.isEmpty else {
+            return nil
+        }
+        return ProjectCreationNotice(
+            message: parts.joined(separator: " "),
+            canRetryUploads: projectCreation.canRetryInitialFiles,
+            canRetryArtwork: projectCreation.canRetryArtwork,
+            canRefreshLibrary: projectCreation.canRefreshCreatedProject,
+            canOpenProject: projectCreation.canOpenCreatedProject,
+            canStartNewProject: projectCreation.canAbandonConfirmedCreation)
     }
 
     func chooseUpload() {
-        guard hasToken, let item = selectedItem, item.canUpload, let projectID = item.projectID else { return }
+        guard credentials.verifiedCredential() != nil,
+              let item = selectedItem, item.canUpload, let projectID = item.projectID else { return }
         let parentID = folderPath.last?.id
         let generation = selectionGeneration
         let panel = NSOpenPanel()
@@ -218,8 +335,11 @@ final class SamplyBackend {
         panel.begin { [weak self] response in
             guard response == .OK, let file = panel.url else { return }
             Task { @MainActor in
-                guard let self, self.selectedItem?.id == item.id, self.selectionGeneration == generation, self.hasToken else { return }
-                self.uploader.upload(file: file, projectID: projectID, parentID: parentID)
+                guard let self, self.selectedItem?.id == item.id,
+                      self.selectionGeneration == generation,
+                      let credential = self.credentials.verifiedCredential() else { return }
+                self.uploader.upload(file: file, projectID: projectID, parentID: parentID,
+                                     token: credential.token)
             }
         }
     }
@@ -243,7 +363,8 @@ final class SamplyBackend {
             case .album(let routeID, let groupID):
                 guard generation == selectionGeneration, let selectedItem,
                       selectedItem.routeID == routeID, folderPath.last?.id == groupID else { return }
-                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID) else {
+                guard state.hasLoadedBoxes(for: selectedItem, groupID: groupID,
+                                           expectedProjectID: selectedItem.projectID) else {
                     throw SamplyError.invalidResponse
                 }
                 boxes = state.boxes
@@ -275,15 +396,35 @@ final class SamplyBackend {
     }
 
     func signOut() async {
+        projectCreation.invalidate()
         invalidateSelection()
         library = []
         playback.clear()
         uploader.reset()
-        hasToken = false
+        sessionGeneration &+= 1
+        credentials.activate(accountID: nil, generation: sessionGeneration)
         do { try tokens.remove() }
         catch { recordFailure(error) }
         accountID = nil
         await web.signOut()
+    }
+
+    /// Applies a project opened through the adapter after REST creation. The
+    /// complete Library was already refreshed, so a delayed history entry is not
+    /// fabricated into the native grid.
+    private func acceptCreatedProject(_ item: LibraryItem, _ snapshot: WebSnapshot) {
+        guard web.snapshot?.account?.uid == snapshot.account?.uid else { return }
+        var opened = item
+        if let routeID = snapshot.routeID, !routeID.isEmpty { opened.shareID = routeID }
+        if let projectID = snapshot.projectID { opened.projectID = projectID }
+        opened.canUpload = true
+        invalidateSelection()
+        selectedItem = opened
+        boxes = snapshot.boxes
+        albumLoadState = .loaded
+        if let index = library.firstIndex(where: { $0.id == opened.id }) {
+            library[index] = opened
+        }
     }
 
     private func invalidateSelection() {

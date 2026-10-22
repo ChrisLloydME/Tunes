@@ -22,20 +22,39 @@ final class SamplyAPI {
         }
     }
 
-    func projects(token: String? = nil) async throws -> [SamplyProject] {
-        try await request(["projects"], token: token)
+    func projects(token: String? = nil, timeout: TimeInterval = 30) async throws -> [SamplyProject] {
+        try await request(["projects"], token: token, timeout: timeout)
     }
 
-    func boxes(projectID: String) async throws -> [SamplyBox] {
-        try await request(["projects", projectID, "all"])
+    func project(projectID: String, token: String? = nil,
+                 timeout: TimeInterval = 15) async throws -> SamplyProject {
+        try await request(["projects", projectID], token: token, timeout: timeout)
     }
 
-    func download(projectID: String, fileID: String) async throws -> DownloadTicket {
-        try await request(["projects", projectID, "files", fileID, "download"])
+    /// Creates an empty owned project through the documented REST API.
+    /// The server also creates a project-scoped player with the account's default
+    /// player options; Tunes never sends those settings or repeats this request.
+    func createProject(name: String, token: String? = nil,
+                       timeout: TimeInterval = 30) async throws -> SamplyProject {
+        struct Body: Encodable {
+            let name: String
+        }
+        return try await request(["projects"], method: "POST",
+                                 body: JSONEncoder().encode(Body(name: name)),
+                                 token: token, timeout: timeout)
+    }
+
+    func boxes(projectID: String, timeout: TimeInterval = 30) async throws -> [SamplyBox] {
+        try await request(["projects", projectID, "all"], timeout: timeout)
+    }
+
+    func download(projectID: String, fileID: String, timeout: TimeInterval = 30) async throws -> DownloadTicket {
+        try await request(["projects", projectID, "files", fileID, "download"], timeout: timeout)
     }
 
     func uploadTicket(projectID: String, name: String, mimeType: String,
-                      size: Int64, parentID: String?) async throws -> UploadTicket {
+                      size: Int64, parentID: String?, token: String? = nil,
+                      timeout: TimeInterval = 30) async throws -> UploadTicket {
         struct Body: Encodable {
             let name: String
             let mimeType: String
@@ -44,7 +63,24 @@ final class SamplyAPI {
         }
         return try await request(["projects", projectID, "files"], method: "POST",
                                  body: JSONEncoder().encode(Body(name: name, mimeType: mimeType,
-                                                               size: size, parentid: parentID)))
+                                                                size: size, parentid: parentID)),
+                                 token: token, timeout: timeout)
+    }
+
+    /// Requests the documented project-artwork upload ticket. The subsequent
+    /// storage PUT is performed by `SamplyUploader`, never by this API session.
+    func artworkTicket(projectID: String, name: String, mimeType: String,
+                       size: Int64, token: String? = nil,
+                       timeout: TimeInterval = 30) async throws -> UploadTicket {
+        struct Body: Encodable {
+            let name: String
+            let mimeType: String
+            let size: Int64
+        }
+        return try await request(["projects", projectID, "artwork"], method: "POST",
+                                 body: JSONEncoder().encode(Body(name: name, mimeType: mimeType,
+                                                                size: size)),
+                                 token: token, timeout: timeout)
     }
 
     static func resourceURL(base: URL, components: [String]) throws -> URL {
@@ -60,7 +96,8 @@ final class SamplyAPI {
     }
 
     private func request<T: Decodable>(_ path: [String], method: String = "GET",
-                                        body: Data? = nil, token: String? = nil) async throws -> T {
+                                        body: Data? = nil, token: String? = nil,
+                                        timeout: TimeInterval = 30) async throws -> T {
         let url = try Self.resourceURL(base: baseURL, components: path)
         guard url.scheme == "https", url.host == "samply.app", url.port == nil else {
             throw SamplyError.insecureURL
@@ -69,6 +106,7 @@ final class SamplyAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
+        request.timeoutInterval = max(0.1, timeout)
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }

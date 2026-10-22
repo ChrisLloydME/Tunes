@@ -139,10 +139,10 @@ final class FileTokenStore: TokenStore {
 
         var errorDescription: String? {
             switch self {
-            case .accountRequired: "Sign in to Samply before saving an upload token."
-            case .read: "The saved upload token could not be restored. Verify and save a new token, or sign out to delete the saved file."
-            case .save: "The upload token could not be saved on this Mac."
-            case .remove: "The saved upload token could not be deleted. It is no longer active in Tunes."
+            case .accountRequired: "Sign in to Samply before saving a personal access token."
+            case .read: "The saved personal access token could not be restored. Verify and save a new token, or sign out to delete the saved file."
+            case .save: "The personal access token could not be saved on this Mac."
+            case .remove: "The saved personal access token could not be deleted. It is no longer active in Tunes."
             }
         }
     }
