@@ -22,8 +22,9 @@ final class SamplyBackend {
     let uploader: SamplyUploader
     let credentials: ProjectCredentialAuthority
     let projectCreation: ProjectCreationCoordinator
-    private(set) var library: [LibraryItem] = []
-    private(set) var boxes: [WebBox] = []
+    private(set) var content = SamplyContentAcceptance()
+    var library: [LibraryItem] { content.library }
+    var boxes: [WebBox] { content.boxes }
     private(set) var selectedItem: LibraryItem?
     private(set) var folderPath: [WebBox] = []
     private(set) var isBrowsing = false
@@ -65,7 +66,7 @@ final class SamplyBackend {
         projectCreation = ProjectCreationCoordinator(api: api, web: web, uploader: uploader,
                                                      credentials: credentials)
         projectCreation.onLibraryRefreshed = { [weak self] items in
-            self?.library = items
+            self?.content.acceptLibrary(items)
         }
         projectCreation.onProjectOpened = { [weak self] item, snapshot in
             self?.acceptCreatedProject(item, snapshot)
@@ -107,7 +108,7 @@ final class SamplyBackend {
             sessionGeneration &+= 1
             projectCreation.invalidate()
             invalidateSelection()
-            library = []
+            content.acceptLibrary([])
             playback.clear()
             uploader.reset()
             // Restore and revalidate only after identity resolves; never reuse
@@ -127,13 +128,13 @@ final class SamplyBackend {
                        itemCount: state.library.count)
                 hasRecordedLibraryAcceptance = true
             }
-            library = state.library
+            content.acceptLibrary(state.library)
         }
         playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
            state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id,
                                 expectedProjectID: selectedItem.projectID) {
-            boxes = state.boxes
+            content.acceptBoxes(state.boxes)
             albumLoadState = .loaded
         }
     }
@@ -184,7 +185,7 @@ final class SamplyBackend {
         selectionGeneration += 1
         let generation = selectionGeneration
         let startedAt = clock.now()
-        boxes = []
+        content.acceptBoxes([])
         isBrowsing = true
         albumLoadState = .loading
         error = nil
@@ -200,7 +201,7 @@ final class SamplyBackend {
                 guard generation == selectionGeneration else { return }
                 if state.hasLoadedBoxes(for: item, groupID: groupID,
                                         expectedProjectID: item.projectID) {
-                    boxes = state.boxes
+                    content.acceptBoxes(state.boxes)
                     albumLoadState = .loaded
                     record(.selection, since: startedAt, itemCount: state.boxes.count)
                 } else {
@@ -402,7 +403,7 @@ final class SamplyBackend {
             switch page {
             case .library:
                 guard state.libraryReady else { throw SamplyError.invalidResponse }
-                library = state.library
+                content.acceptLibrary(state.library)
                 record(.serverRefresh, since: startedAt, itemCount: state.library.count)
             case .album(let routeID, let groupID):
                 guard generation == selectionGeneration, let selectedItem,
@@ -411,7 +412,7 @@ final class SamplyBackend {
                                            expectedProjectID: selectedItem.projectID) else {
                     throw SamplyError.invalidResponse
                 }
-                boxes = state.boxes
+                content.acceptBoxes(state.boxes)
                 albumLoadState = .loaded
                 record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
             }
@@ -444,7 +445,7 @@ final class SamplyBackend {
     func signOut() async {
         projectCreation.invalidate()
         invalidateSelection()
-        library = []
+        content.acceptLibrary([])
         playback.clear()
         uploader.reset()
         sessionGeneration &+= 1
@@ -466,11 +467,9 @@ final class SamplyBackend {
         opened.canUpload = true
         invalidateSelection()
         selectedItem = opened
-        boxes = snapshot.boxes
+        content.acceptBoxes(snapshot.boxes)
         albumLoadState = .loaded
-        if let index = library.firstIndex(where: { $0.id == opened.id }) {
-            library[index] = opened
-        }
+        content.replaceLibraryItem(opened)
     }
 
     private func invalidateSelection() {
@@ -482,7 +481,7 @@ final class SamplyBackend {
         browseTask?.cancel()
         playTask?.cancel()
         selectedItem = nil
-        boxes = []
+        content.acceptBoxes([])
         folderPath = []
         isBrowsing = false
         albumLoadState = .idle

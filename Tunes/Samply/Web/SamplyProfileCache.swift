@@ -13,6 +13,8 @@ final class SamplyProfileCache {
 
     private(set) var account: WebSnapshot.Account?
     private(set) var avatarData: Data?
+    /// Acceptance counter for focused tests; display state remains the source of truth.
+    @ObservationIgnored private(set) var accountAssignmentCount = 0
     @ObservationIgnored private let defaults: UserDefaults?
     @ObservationIgnored private var download: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
@@ -38,8 +40,11 @@ final class SamplyProfileCache {
             avatarData = nil
         }
         let metadataChanged = self.account != account
-        self.account = account
-        if metadataChanged { save() }
+        if metadataChanged {
+            self.account = account
+            accountAssignmentCount &+= 1
+            save()
+        }
         guard avatarData == nil, download == nil,
               let value = account.avatarURL, let url = URL(string: value),
               url.scheme?.lowercased() == "https" else { return }

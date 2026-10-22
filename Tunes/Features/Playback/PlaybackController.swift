@@ -13,32 +13,77 @@ final class PlaybackController {
     @ObservationIgnored private let web: SamplyWebSession
     @ObservationIgnored private var libraryItemFileID: String?
     @ObservationIgnored private var remoteTargets: [(MPRemoteCommand, Any)] = []
+    @ObservationIgnored private var publishedPresentation: NowPlayingPresentation?
+    @ObservationIgnored private var publishedElapsed: Double = 0
+    /// Acceptance counters for focused tests and diagnostics.
+    @ObservationIgnored private(set) var stateAssignmentCount = 0
+    @ObservationIgnored private(set) var libraryItemAssignmentCount = 0
+
+    /// Keys that require rebuilding the complete Now Playing dictionary.
+    /// Position and elapsed time are updated separately so an unrelated Library
+    /// change or a normal clock tick does not rebuild track metadata.
+    private struct NowPlayingPresentation: Equatable {
+        let fileID: String?
+        let title: String?
+        let artist: String?
+        let album: String?
+        let duration: Double
+        let playing: Bool
+        let canGoNext: Bool
+        let canGoPrevious: Bool
+    }
 
     init(web: SamplyWebSession) { self.web = web }
 
-    func apply(_ state: WebPlayback?, libraryItem: LibraryItem? = nil) {
-        let hadPlayerError = self.state.error != nil
-        self.state = state ?? .empty
-        if self.state.fileID == nil {
-            self.libraryItem = nil
-            libraryItemFileID = nil
-        } else if let libraryItem {
-            self.libraryItem = libraryItem
-            libraryItemFileID = self.state.fileID
+    func apply(_ newState: WebPlayback?, libraryItem: LibraryItem? = nil) {
+        let resolved = newState ?? .empty
+        let hadPlayerError = state.error != nil
+        let stateChanged = resolved != state
+        if stateChanged {
+            state = resolved
+            stateAssignmentCount &+= 1
         }
-        if let failure = state?.error {
+
+        var bindingChanged = false
+        if resolved.fileID == nil {
+            if self.libraryItem != nil {
+                self.libraryItem = nil
+                libraryItemAssignmentCount &+= 1
+                bindingChanged = true
+            }
+            if libraryItemFileID != nil {
+                libraryItemFileID = nil
+                bindingChanged = true
+            }
+        } else if let libraryItem {
+            if self.libraryItem != libraryItem {
+                self.libraryItem = libraryItem
+                libraryItemAssignmentCount &+= 1
+                bindingChanged = true
+            }
+            if libraryItemFileID != resolved.fileID {
+                libraryItemFileID = resolved.fileID
+                bindingChanged = true
+            }
+        }
+
+        if let failure = newState?.error {
             error = failure
             hasTransientError = false
-        } else if state != nil, hasTransientError || hadPlayerError {
+        } else if newState != nil, hasTransientError || hadPlayerError {
             error = nil
             hasTransientError = false
         }
-        updateNowPlaying()
+        if stateChanged || bindingChanged { updateNowPlaying() }
     }
 
     func applySnapshot(_ snapshot: WebSnapshot) {
-        libraryItem = libraryItem.map { current in
-            snapshot.library.first { $0.id == current.id } ?? current
+        // Keep the playing Library entry current without replacing an equal value.
+        if let current = libraryItem,
+           let updated = snapshot.library.first(where: { $0.id == current.id }),
+           updated != current {
+            libraryItem = updated
+            libraryItemAssignmentCount &+= 1
         }
         var resolvedItem: LibraryItem?
         // Navigation alone must not replace the playing album. Resolve a new origin
@@ -56,10 +101,10 @@ final class PlaybackController {
     }
 
     func clear() {
-        state = .empty
-        libraryItem = nil
-        libraryItemFileID = nil
-        error = nil
+        if state != .empty { state = .empty }
+        if libraryItem != nil { libraryItem = nil }
+        if libraryItemFileID != nil { libraryItemFileID = nil }
+        if error != nil { error = nil }
         hasTransientError = false
         updateNowPlaying()
     }
@@ -103,29 +148,49 @@ final class PlaybackController {
     }
 
     private func updateNowPlaying() {
-        let center = MPRemoteCommandCenter.shared()
-        let ready = state.fileID != nil
-        center.playCommand.isEnabled = ready
-        center.pauseCommand.isEnabled = ready
-        center.togglePlayPauseCommand.isEnabled = ready
-        center.nextTrackCommand.isEnabled = ready && state.canGoNext
-        center.previousTrackCommand.isEnabled = ready && state.canGoPrevious
-        center.changePlaybackPositionCommand.isEnabled = ready && state.duration > 0
+        let presentation = NowPlayingPresentation(
+            fileID: state.fileID, title: state.title, artist: state.artist,
+            album: state.album, duration: state.duration, playing: state.playing,
+            canGoNext: state.canGoNext, canGoPrevious: state.canGoPrevious)
+        let presentationChanged = presentation != publishedPresentation
         let info = MPNowPlayingInfoCenter.default()
-        guard ready else {
-            info.nowPlayingInfo = nil
-            info.playbackState = .stopped
+
+        if presentationChanged {
+            let center = MPRemoteCommandCenter.shared()
+            let ready = state.fileID != nil
+            center.playCommand.isEnabled = ready
+            center.pauseCommand.isEnabled = ready
+            center.togglePlayPauseCommand.isEnabled = ready
+            center.nextTrackCommand.isEnabled = ready && state.canGoNext
+            center.previousTrackCommand.isEnabled = ready && state.canGoPrevious
+            center.changePlaybackPositionCommand.isEnabled = ready && state.duration > 0
+            publishedPresentation = presentation
+
+            guard ready else {
+                info.nowPlayingInfo = nil
+                info.playbackState = .stopped
+                publishedElapsed = 0
+                return
+            }
+            info.nowPlayingInfo = [
+                MPMediaItemPropertyTitle: state.title ?? "Samply",
+                MPMediaItemPropertyArtist: state.artist ?? "",
+                MPMediaItemPropertyAlbumTitle: state.album ?? "",
+                MPMediaItemPropertyPlaybackDuration: state.duration,
+                MPNowPlayingInfoPropertyElapsedPlaybackTime: state.position,
+                MPNowPlayingInfoPropertyPlaybackRate: state.playing ? 1.0 : 0.0,
+                MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue
+            ]
+            info.playbackState = state.playing ? .playing : .paused
+            publishedElapsed = state.position
             return
         }
-        info.nowPlayingInfo = [
-            MPMediaItemPropertyTitle: state.title ?? "Samply",
-            MPMediaItemPropertyArtist: state.artist ?? "",
-            MPMediaItemPropertyAlbumTitle: state.album ?? "",
-            MPMediaItemPropertyPlaybackDuration: state.duration,
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: state.position,
-            MPNowPlayingInfoPropertyPlaybackRate: state.playing ? 1.0 : 0.0,
-            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue
-        ]
-        info.playbackState = state.playing ? .playing : .paused
+
+        // Clock ticks and seeks only update the timing keys; metadata stays intact.
+        guard state.fileID != nil, abs(state.position - publishedElapsed) >= 0.5,
+              var current = info.nowPlayingInfo else { return }
+        current[MPNowPlayingInfoPropertyElapsedPlaybackTime] = state.position
+        info.nowPlayingInfo = current
+        publishedElapsed = state.position
     }
 }
