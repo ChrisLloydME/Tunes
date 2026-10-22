@@ -41,10 +41,10 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Track selection and streaming through Samply's own `audio-module.loadBox`, with play, pause, seek, volume, and previous/next controls.
 - AAC and lossless options, with format and availability determined by Samply; quality changes preserve playback position.
 - macOS Now Playing integration and media keys.
-- Official REST integration for project creation, owned projects, project files, folders, stacks, signed download URL queries, and original-file upload tickets.
+- Official REST integration for project creation, owned projects, project files, folders, stacks, signed download URL queries, and artwork/original-file upload tickets.
 - Native project creation from Library using the documented `POST /projects` request, with optional artwork and optional files added after creation, followed by an automatic complete web Library refresh. The creation sheet returns to Library without opening the new project.
-- Project artwork selection from Files or Photos with local validation and downsampling, assigned through Samply's authorized web upload path rather than an invented REST field.
-- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file outcomes, surfaced in the sheet or a Library notice.
+- Project artwork selection from Files or Photos with local validation and downsampling, uploaded through the documented `POST /projects/:projectid/artwork` ticket and storage PUT with `x-goog-meta-writeback`. Tunes reports submitted bytes as confirmation pending because no documented read proves which box became the artwork.
+- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file phases and uncertainty, surfaced in the sheet or a Library notice. Cancellation before submission is retryable; a ticket or PUT that may have reached Samply is not blindly retried.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
 ## Local signing
@@ -70,4 +70,4 @@ xcodebuild -project Tunes.xcodeproj -scheme Tunes -configuration Debug \
 node --test Scripts/test-samply-bridge.mjs
 ```
 
-Tests use fixture credentials in memory or temporary directories, plus simulated network and web objects. They do not sign in to real accounts, create real Samply projects, assign live artwork, or upload files to cloud storage. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.
+Tests use fixture credentials in memory or temporary directories, plus simulated network and web objects. They do not sign in to real accounts, create real Samply projects, assign live artwork, or upload files to cloud storage. Hosted unit tests cover credential identity, creation quarantine, operation lifetimes, upload phases, artwork timeouts, and Library recovery. Manual verification instructions are provided in chat only. See [Samply backend](Docs/SamplyBackend.md) for architecture and outstanding work.
