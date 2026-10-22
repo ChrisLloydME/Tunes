@@ -8,10 +8,10 @@ struct NewProjectSheet: View {
         case details, files
     }
 
-    private let sheetWidth: CGFloat = 460
+    private let sheetWidth: CGFloat = 420
     private let sheetHeight: CGFloat = 680
     private let pagePadding: CGFloat = 20
-    private let artworkPreviewSide: CGFloat = 360
+    private var contentWidth: CGFloat { sheetWidth - pagePadding * 2 }
 
     @Bindable var backend: SamplyBackend
     var onReturnToLibrary: () -> Void = {}
@@ -98,8 +98,8 @@ struct NewProjectSheet: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, pagePadding)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
+                .padding(.top, 18)
+                .padding(.bottom, 12)
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 Text("New Project")
@@ -111,8 +111,8 @@ struct NewProjectSheet: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, pagePadding)
-            .padding(.top, 20)
-            .padding(.bottom, 16)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
         }
     }
 
@@ -153,7 +153,7 @@ struct NewProjectSheet: View {
     }
 
     private var detailsForm: some View {
-        VStack(alignment: .leading, spacing: 18) {
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Project Name")
                     .font(.body.weight(.medium))
@@ -173,7 +173,7 @@ struct NewProjectSheet: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
                     artworkPreview
@@ -182,7 +182,7 @@ struct NewProjectSheet: View {
                 HStack(spacing: 0) {
                     Spacer(minLength: 0)
                     artworkButtons
-                        .frame(width: artworkPreviewSide)
+                        .frame(width: contentWidth)
                     Spacer(minLength: 0)
                 }
                 if isPreparingArtwork {
@@ -282,7 +282,7 @@ struct NewProjectSheet: View {
                 }
             }
         }
-        .frame(width: artworkPreviewSide, height: artworkPreviewSide)
+        .frame(width: contentWidth, height: contentWidth)
         .clipShape(.rect(cornerRadius: 14))
         .accessibilityElement(children: .contain)
     }
@@ -429,6 +429,8 @@ struct NewProjectSheet: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Remove \(row.fileName)")
