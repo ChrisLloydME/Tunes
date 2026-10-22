@@ -8,6 +8,11 @@ struct NewProjectSheet: View {
         case details, files
     }
 
+    private let sheetWidth: CGFloat = 460
+    private let sheetHeight: CGFloat = 680
+    private let pagePadding: CGFloat = 20
+    private let artworkPreviewSide: CGFloat = 360
+
     @Bindable var backend: SamplyBackend
     var onReturnToLibrary: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
@@ -37,10 +42,10 @@ struct NewProjectSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             Divider()
             footer
-                .padding(.horizontal, 24)
+                .padding(.horizontal, pagePadding)
                 .padding(.vertical, 14)
         }
-        .frame(width: 620, height: 640, alignment: .topLeading)
+        .frame(width: sheetWidth, height: sheetHeight, alignment: .topLeading)
         .interactiveDismissDisabled(showsFilesPage ? blocksFilesPageDismissal : creation.blocksDismissal)
         .onAppear {
             if creation.canFinishCreatedProject { creation.reset() }
@@ -92,8 +97,8 @@ struct NewProjectSheet: View {
                 .lineLimit(2)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.top, 22)
+                .padding(.horizontal, pagePadding)
+                .padding(.top, 20)
                 .padding(.bottom, 16)
         } else {
             VStack(alignment: .leading, spacing: 6) {
@@ -105,8 +110,8 @@ struct NewProjectSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.top, 22)
+            .padding(.horizontal, pagePadding)
+            .padding(.top, 20)
             .padding(.bottom, 16)
         }
     }
@@ -143,7 +148,7 @@ struct NewProjectSheet: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(24)
+            .padding(pagePadding)
         }
     }
 
@@ -169,8 +174,17 @@ struct NewProjectSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                artworkPreview
-                artworkButtons
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    artworkPreview
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    artworkButtons
+                        .frame(width: artworkPreviewSide)
+                    Spacer(minLength: 0)
+                }
                 if isPreparingArtwork {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -268,8 +282,7 @@ struct NewProjectSheet: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 230)
+        .frame(width: artworkPreviewSide, height: artworkPreviewSide)
         .clipShape(.rect(cornerRadius: 14))
         .accessibilityElement(children: .contain)
     }
@@ -306,8 +319,28 @@ struct NewProjectSheet: View {
 
     // MARK: - Files page
 
+    private var fileRows: [ProjectFileRow] {
+        var rows = filesToUpload.map {
+            ProjectFileRow(id: "local-\($0.id.uuidString)",
+                           fileName: $0.fileName,
+                           status: "Ready to upload",
+                           symbol: "doc",
+                           progress: nil,
+                           localID: $0.id)
+        }
+        rows.append(contentsOf: creation.initialFiles.map {
+            ProjectFileRow(id: "upload-\($0.id.uuidString)",
+                           fileName: $0.fileName,
+                           status: initialFileStatus($0),
+                           symbol: initialFileSymbol($0.status),
+                           progress: $0.status == .uploading ? $0.progress : nil,
+                           localID: nil)
+        })
+        return rows
+    }
+
     private var filesPage: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Files")
                     .font(.headline)
@@ -317,12 +350,13 @@ struct NewProjectSheet: View {
                 } label: {
                     Label("Choose Files…", systemImage: "plus")
                 }
+                .buttonStyle(.bordered)
                 .disabled(creation.isUploadingInitialFiles)
                 .accessibilityLabel("Choose files to upload")
             }
 
-            if filesToUpload.isEmpty, creation.initialFiles.isEmpty {
-                VStack(spacing: 12) {
+            if fileRows.isEmpty {
+                VStack(spacing: 10) {
                     Image(systemName: "doc.badge.plus")
                         .font(.system(size: 34, weight: .regular))
                         .foregroundStyle(.secondary)
@@ -333,75 +367,26 @@ struct NewProjectSheet: View {
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                 }
-                .frame(maxWidth: .infinity, minHeight: 300)
-                .padding(24)
-                .background {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(.quaternary.opacity(0.45))
-                }
+                .padding(.horizontal, 24)
+                .frame(maxWidth: .infinity, minHeight: 360)
+                .background { fileCardBackground }
+                .overlay { fileCardBorder }
             } else {
-                List {
-                    if !filesToUpload.isEmpty {
-                        Section("Ready to Upload") {
-                            ForEach(filesToUpload) { file in
-                                HStack(spacing: 12) {
-                                    Image(systemName: "doc")
-                                        .font(.title3)
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(file.fileName)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                        Text("Ready to upload")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Button {
-                                        filesToUpload.removeAll { $0.id == file.id }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Remove \(file.fileName)")
-                                    .accessibilityLabel("Remove \(file.fileName)")
-                                }
-                                .padding(.vertical, 4)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(fileRows) { row in
+                            fileRow(row)
+                            if row.id != fileRows.last?.id {
+                                Divider()
+                                    .padding(.leading, 52)
                             }
                         }
                     }
-
-                    if !creation.initialFiles.isEmpty {
-                        Section("Uploads") {
-                            ForEach(creation.initialFiles) { file in
-                                HStack(alignment: .top, spacing: 12) {
-                                    Image(systemName: initialFileSymbol(file.status))
-                                        .font(.title3)
-                                        .foregroundStyle(.secondary)
-                                        .frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(file.fileName)
-                                            .lineLimit(1)
-                                            .truncationMode(.middle)
-                                        Text(initialFileStatus(file))
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                        if file.status == .uploading {
-                                            ProgressView(value: file.progress)
-                                        }
-                                    }
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.vertical, 4)
-                            }
-                        }
-                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background { fileCardBackground }
+                    .overlay { fileCardBorder }
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
 
             if creation.canRetryInitialFiles {
@@ -410,11 +395,59 @@ struct NewProjectSheet: View {
                     Button("Retry Failed Files") {
                         creation.retryFailedInitialFiles()
                     }
+                    .buttonStyle(.bordered)
                 }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .padding(24)
+        .padding(pagePadding)
+    }
+
+    private func fileRow(_ row: ProjectFileRow) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: row.symbol)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 24, height: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(row.fileName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(row.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let progress = row.progress {
+                    ProgressView(value: progress)
+                        .controlSize(.small)
+                }
+            }
+            Spacer(minLength: 8)
+            if let localID = row.localID {
+                Button {
+                    filesToUpload.removeAll { $0.id == localID }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Remove \(row.fileName)")
+                .accessibilityLabel("Remove \(row.fileName)")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+    }
+
+    private var fileCardBackground: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .fill(.quaternary.opacity(0.28))
+    }
+
+    private var fileCardBorder: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.55))
     }
 
     // MARK: - Guidance
@@ -688,6 +721,15 @@ struct NewProjectSheet: View {
         }
         dismiss()
     }
+}
+
+private struct ProjectFileRow: Identifiable {
+    let id: String
+    let fileName: String
+    let status: String
+    let symbol: String
+    let progress: Double?
+    let localID: UUID?
 }
 
 private struct SelectedProjectFile: Identifiable, Equatable {
