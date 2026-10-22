@@ -44,7 +44,7 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Official REST integration for project creation, owned projects, project files, folders, stacks, signed download URL queries, and original-file upload tickets.
 - Native project creation from Library using the documented `POST /projects` request, with optional artwork and optional files added after creation, followed by an automatic complete web Library refresh. The creation sheet returns to Library without opening the new project.
 - Project artwork selection from Files or Photos with local validation and downsampling, assigned through Samply's authorized web upload path rather than an invented REST field.
-- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file outcomes.
+- Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file outcomes, surfaced in the sheet or a Library notice.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
 ## Local signing
