@@ -36,12 +36,13 @@ struct TunesTests {
             let json = try #require(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
             #expect(Set(json.keys) == ["name"])
             #expect(json["name"] as? String == "Été – 東京")
-            return (200, [:], #"{"id":"project-new","name":"Été – 東京","object":"project","size":0,"timeCreated":1700000000000,"timeModified":1700000000001,"playerUrl":"https://samply.app/p/share-new"}"#)
+            return (200, [:], #"{"id":"project-new","name":"Été – 東京","object":"project","size":0,"timeCreated":1700000000000,"timeModified":1700000000001,"playerUrl":"https://samply.app/p/share-new","creator":{"uid":"account-a","displayName":"Owner"}}"#)
         }
         let project = try await api.createProject(name: "Été – 東京")
         #expect(project.id == "project-new")
         #expect(project.name == "Été – 東京")
         #expect(project.playerUrl?.absoluteString == "https://samply.app/p/share-new")
+        #expect(project.creator?.uid == "account-a")
     }
 
     @Test func createProjectMapsAuthenticationErrorsWithoutServerDetails() async throws {
@@ -125,6 +126,74 @@ struct TunesTests {
         #expect(request.value(forHTTPHeaderField: "x-goog-meta-projectid") == "project-1")
         #expect(request.value(forHTTPHeaderField: "x-goog-meta-destination") == "asset")
         #expect(request.value(forHTTPHeaderField: "x-goog-meta-boxpath") == "projects/project-1/boxes/new-file")
+    }
+
+    @Test func artworkTicketUsesTheOfficialRouteAndImageMetadata() async throws {
+        let api = client { request in
+            #expect(request.httpMethod == "POST")
+            #expect(request.url?.path == "/api/v0/projects/project-1/artwork")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer fixture-token")
+            let json = try #require(JSONSerialization.jsonObject(with: requestBody(request)) as? [String: Any])
+            #expect(Set(json.keys) == ["name", "mimeType", "size"])
+            #expect(json["name"] as? String == "Cover.jpg")
+            #expect(json["mimeType"] as? String == "image/jpeg")
+            #expect(json["size"] as? Int == 3)
+            return (200, [:], #"{"boxid":"art-box","contentType":"image/jpeg","metadata":{"destination":"asset","projectid":"project-1","boxpath":"projects/project-1/boxes/art-box","writeback":"project"},"url":"https://storage.googleapis.com/artwork-upload"}"#)
+        }
+        let ticket = try await api.artworkTicket(projectID: "project-1", name: "Cover.jpg",
+                                                 mimeType: "image/jpeg", size: 3)
+        let request = try SamplyUploader.storageRequest(ticket: ticket, kind: .artwork,
+                                                        expectedProjectID: "project-1")
+        #expect(request.httpMethod == "PUT")
+        #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
+        #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+        #expect(request.value(forHTTPHeaderField: "Content-Type") == "image/jpeg")
+        #expect(request.value(forHTTPHeaderField: "x-goog-meta-writeback") == "project")
+        #expect(request.value(forHTTPHeaderField: "x-goog-meta-projectid") == "project-1")
+    }
+
+    @Test func artworkStorageRejectsMissingWritebackAndNonImageTickets() throws {
+        let missing = UploadTicket(
+            boxid: "art-box", contentType: "image/jpeg",
+            metadata: ["destination": "asset", "projectid": "p", "boxpath": "p/art"],
+            stackid: nil, url: URL(string: "https://storage.example/upload")!)
+        #expect(throws: (any Error).self) {
+            try SamplyUploader.storageRequest(ticket: missing, kind: .artwork,
+                                              expectedProjectID: "p")
+        }
+        let nonImage = UploadTicket(
+            boxid: "art-box", contentType: "audio/wav",
+            metadata: ["destination": "asset", "projectid": "p", "boxpath": "p/art",
+                       "writeback": "project"],
+            stackid: nil, url: URL(string: "https://storage.example/upload")!)
+        #expect(throws: (any Error).self) {
+            try SamplyUploader.storageRequest(ticket: nonImage, kind: .artwork,
+                                              expectedProjectID: "p")
+        }
+        let wrongProject = UploadTicket(
+            boxid: "art-box", contentType: "image/jpeg",
+            metadata: ["destination": "asset", "projectid": "other", "boxpath": "p/art",
+                       "writeback": "project"],
+            stackid: nil, url: URL(string: "https://storage.example/upload")!)
+        #expect(throws: (any Error).self) {
+            try SamplyUploader.storageRequest(ticket: wrongProject, kind: .artwork,
+                                              expectedProjectID: "p")
+        }
+    }
+
+    @Test func artworkTicketPostIsNeverRetriedAndUsesTheCapturedToken() async throws {
+        let log = RequestCounter()
+        let api = client { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer captured-token")
+            _ = log.increment()
+            return (503, [:], "{}")
+        }
+        await #expect(throws: (any Error).self) {
+            try await api.artworkTicket(projectID: "p", name: "Cover.jpg",
+                                        mimeType: "image/jpeg", size: 3,
+                                        token: "captured-token")
+        }
+        #expect(log.count == 1)
     }
 
     @Test func storageRejectsInsecureURLAndMissingMetadata() throws {
