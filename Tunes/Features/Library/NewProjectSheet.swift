@@ -28,7 +28,26 @@ struct NewProjectSheet: View {
     @State private var accountID: String?
     @FocusState private var nameFieldFocused: Bool
 
-    private var creation: ProjectCreationCoordinator { backend.projectCreation }
+    #if DEBUG
+    var reviewCreation: ProjectCreationCoordinator?
+    #endif
+
+    private var isReviewing: Bool {
+        #if DEBUG
+        reviewCreation != nil
+        #else
+        false
+        #endif
+    }
+
+    private var isConnected: Bool { isReviewing || backend.isConnected }
+    private var hasToken: Bool { isReviewing || backend.hasToken }
+    private var creation: ProjectCreationCoordinator {
+        #if DEBUG
+        if let reviewCreation { return reviewCreation }
+        #endif
+        return backend.projectCreation
+    }
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var isPreparingArtwork: Bool { isTransferringPhoto || artworkStore.isLoading }
     private var showsFilesPage: Bool { page == .files && creation.createdProject != nil }
@@ -129,9 +148,9 @@ struct NewProjectSheet: View {
     @ViewBuilder private var detailsPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                if !backend.isConnected {
+                if !isConnected {
                     signedOutGuidance
-                } else if backend.hasToken {
+                } else if hasToken {
                     switch creation.state {
                     case .idle, .failed:
                         detailsForm
@@ -502,7 +521,7 @@ struct NewProjectSheet: View {
         } else {
             switch creation.state {
             case .idle, .failed:
-                if backend.isConnected, backend.hasToken {
+                if isConnected, hasToken {
                     Button("Cancel") { closeDetails() }
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("cancelNewProject")
@@ -541,7 +560,7 @@ struct NewProjectSheet: View {
         } else {
             switch creation.state {
             case .idle, .failed:
-                if backend.isConnected, backend.hasToken {
+                if isConnected, hasToken {
                     Button("Create") { submit() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(trimmedName.isEmpty || creation.isCreating || isPreparingArtwork)
@@ -710,7 +729,7 @@ struct NewProjectSheet: View {
     }
 
     private func submit() {
-        guard backend.isConnected, backend.hasToken, !creation.isCreating,
+        guard isConnected, hasToken, !creation.isCreating,
               !isPreparingArtwork else { return }
         guard !trimmedName.isEmpty else {
             validationMessage = "Enter a project name."
@@ -726,7 +745,7 @@ struct NewProjectSheet: View {
 
     private func returnToLibrary() {
         onReturnToLibrary()
-        Task { await backend.refresh(.library) }
+        if !isReviewing { Task { await backend.refresh(.library) } }
         dismiss()
     }
 

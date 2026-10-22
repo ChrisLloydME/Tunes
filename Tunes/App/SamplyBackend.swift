@@ -245,9 +245,12 @@ final class SamplyBackend {
     }
 
     private func refreshProjectCreationNotice() {
+        projectCreationNotice = Self.creationNotice(for: projectCreation)
+    }
+
+    static func creationNotice(for projectCreation: ProjectCreationCoordinator) -> ProjectCreationNotice? {
         guard let created = projectCreation.createdProject else {
-            projectCreationNotice = nil
-            return
+            return nil
         }
         let name = created.project.name
         var parts: [String] = []
@@ -278,10 +281,9 @@ final class SamplyBackend {
             break
         }
         guard !parts.isEmpty else {
-            projectCreationNotice = nil
-            return
+            return nil
         }
-        projectCreationNotice = ProjectCreationNotice(
+        return ProjectCreationNotice(
             message: parts.joined(separator: " "),
             canRetryUploads: projectCreation.canRetryInitialFiles,
             canRetryArtwork: projectCreation.canRetryArtwork)
