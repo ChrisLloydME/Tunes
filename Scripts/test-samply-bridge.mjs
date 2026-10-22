@@ -36,23 +36,8 @@ function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
         {id: 'player-1', projectid: 'project-1', playerid: 'player-1', shareid: 'share-1', name: 'Shared', owner: 'user-b'},
         {id: 'archive', name: 'Archive', archived: true}
     ], canUploadFilesInProject(id) { return id === 'project-1'; }};
-    const upload = {
-        async uploadFileItems(options) {
-            calls.push(['uploadArtwork', options]);
-            const boxid = 'artwork-box';
-            server.projectDocs[options.projectid].artwork = {
-                micro: {ref: boxid, src: 'https://example.test/artwork-micro.jpg'},
-                small: {ref: boxid, src: 'https://example.test/artwork-small.jpg'},
-                medium: {ref: boxid, src: 'https://example.test/artwork-medium.jpg'},
-                large: {ref: boxid, src: 'https://example.test/artwork-large.jpg'},
-                original: {ref: boxid, src: 'https://example.test/artwork-original.jpg'}
-            };
-            setTimeout(() => options.uploadTaskCallbacks?.onComplete?.(), 0);
-            return [boxid];
-        }
-    };
     const stores = new Map([['profile-auth-module', auth], ['library', library], ['player', player],
-        ['boxes', boxes], ['audio-module', audio], ['upload', upload]]);
+        ['boxes', boxes], ['audio-module', audio]]);
     const router = {currentRoute: {value: {params: {shareid: 'share-1'}}},
         async push(route) {
             calls.push(['navigate', route]);
@@ -375,30 +360,39 @@ test('rejects a loaded player whose project identity differs from the requested 
     }), /did not match/);
 });
 
-test('assigns project artwork through the authorized hidden system upload', async () => {
+test('proves project ownership through the authenticated web project read', async () => {
     const f = fixture();
-    const result = await f.bridge.command('setProjectArtwork', {
-        projectID: 'project-1', fileName: 'cover.jpg', mimeType: 'image/jpeg',
-        dataBase64: Buffer.from([1, 2, 3]).toString('base64')
+    const result = await f.bridge.command('projectOwnership', {projectID: 'project-1'});
+    assert.deepEqual(plain(result), {
+        accountID: 'user-a', projectID: 'project-1', exists: true, ownerID: 'user-a'
     });
-    assert.equal(result.status, 'confirmed');
-    const upload = f.calls.find(call => call[0] === 'uploadArtwork');
-    assert.equal(upload[1].projectid, 'project-1');
-    assert.equal(upload[1].writeback, 'project');
-    assert.equal(upload[1].isSystem, true);
-    assert.equal(upload[1].isHidden, false);
-    assert.equal(f.server.projectDocs['project-1'].artwork.small.ref, 'artwork-box');
+    assert.deepEqual(f.calls.filter(call => call[0] === 'serverDoc'), [
+        ['serverDoc', {path: ['projects', 'project-1']}]
+    ]);
     assert.equal(f.calls.some(call => call[0] === 'navigate'), false);
 });
 
-test('reports an unsupported artwork contract instead of inventing a write path', async () => {
+test('reports missing project ownership without inventing an owner', async () => {
     const f = fixture();
-    f.stores.delete('upload');
-    const result = await f.bridge.command('setProjectArtwork', {
+    const result = await f.bridge.command('projectOwnership', {projectID: 'missing'});
+    assert.deepEqual(plain(result), {
+        accountID: 'user-a', projectID: 'missing', exists: false
+    });
+});
+
+test('project ownership read requires a signed-in account', async () => {
+    const f = fixture({anonymous: true});
+    await assert.rejects(f.bridge.command('projectOwnership', {projectID: 'project-1'}),
+        error => error.code === 'TUNES_OPERATION_FAILED');
+    assert.equal(f.calls.some(call => call[0] === 'serverDoc'), false);
+});
+
+test('does not expose an artwork mutation command after migrating to REST', async () => {
+    const f = fixture();
+    await assert.rejects(f.bridge.command('setProjectArtwork', {
         projectID: 'project-1', fileName: 'cover.jpg', mimeType: 'image/jpeg',
         dataBase64: Buffer.from([1, 2, 3]).toString('base64')
-    });
-    assert.equal(result.status, 'unsupported');
+    }), /Unsupported Tunes command/);
     assert.equal(f.calls.some(call => call[0] === 'uploadArtwork'), false);
 });
 
