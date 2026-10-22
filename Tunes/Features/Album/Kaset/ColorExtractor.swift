@@ -33,15 +33,14 @@ enum ColorExtractor {
         )
     }
 
-    /// Returns an image-derived palette for a URL, reusing a shared cache so accent
-    /// backgrounds across detail views do not redownload or re-extract the same
-    /// artwork. The image cache remains in memory for this process only.
+    /// Returns an image-derived palette for a URL, reusing the shared pipeline
+    /// cache keyed by account epoch, complete URL, and pixel-size bucket.
+    /// The image and palette caches remain in memory for this process only.
     static func cachedPalette(
         for url: URL,
         targetSize: CGSize = CGSize(width: 64, height: 64)
     ) async -> ColorPalette {
-        guard let image = await PlayerArtworkCache.image(for: url, targetSize: targetSize) else { return .default }
-        return self.extractPalette(from: image)
+        await ArtworkPipeline.shared.palette(for: url, targetSize: targetSize)
     }
 
     /// Extracts a color palette from an NSImage.

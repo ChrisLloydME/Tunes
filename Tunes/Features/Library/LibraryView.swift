@@ -153,20 +153,43 @@ struct ProjectArtwork: View {
     let artwork: String?
     let size: CGFloat
     var cornerRadius: CGFloat = 8
+    var placeholderSystemImage = "square.stack"
+    var placeholderPointSize: CGFloat?
+    @State private var image: NSImage?
+    @State private var loadedArtwork: String?
 
     var body: some View {
-        AsyncImage(url: artwork.flatMap(URL.init(string:))) { image in
-            image.resizable().scaledToFill()
-        } placeholder: {
-            Rectangle().fill(.quaternary)
-                .overlay {
-                    Image(systemName: "square.stack")
-                        .font(.system(size: size * 0.2))
-                        .foregroundStyle(.secondary)
-                }
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Rectangle().fill(.quaternary)
+                    .overlay {
+                        Image(systemName: placeholderSystemImage)
+                            .font(.system(size: placeholderPointSize ?? size * 0.2))
+                            .foregroundStyle(.secondary)
+                    }
+            }
         }
         .frame(width: size, height: size)
         .clipShape(.rect(cornerRadius: cornerRadius))
         .accessibilityHidden(true)
+        .task(id: loadKey) {
+            guard let url = artwork.flatMap(URL.init(string:)) else {
+                image = nil
+                loadedArtwork = nil
+                return
+            }
+            if loadedArtwork != artwork { image = nil }
+            let loaded = await ArtworkPipeline.shared.image(
+                for: url, targetSize: CGSize(width: size, height: size))
+            guard !Task.isCancelled else { return }
+            image = loaded
+            loadedArtwork = artwork
+        }
     }
+
+    private var loadKey: String { "\(artwork ?? "")|\(size)" }
 }

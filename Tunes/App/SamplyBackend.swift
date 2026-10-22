@@ -169,6 +169,7 @@ final class SamplyBackend {
         let newAccount = account?.uid
         guard !hasResolvedTokenAccount || newAccount != accountID else { return false }
         sessionGeneration &+= 1
+        ArtworkPipeline.shared.updateEpoch(sessionGeneration)
         cancelActivePageRead()
         resetRecoveryBudget()
         projectCreation.invalidate()
@@ -716,6 +717,7 @@ final class SamplyBackend {
         playback.clear()
         uploader.reset()
         sessionGeneration &+= 1
+        ArtworkPipeline.shared.updateEpoch(sessionGeneration)
         credentials.activate(accountID: nil, generation: sessionGeneration)
         do { try tokens.remove() }
         catch { recordFailure(error) }

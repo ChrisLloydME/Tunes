@@ -16,18 +16,32 @@ final class SamplyProfileCache {
     /// Acceptance counter for focused tests; display state remains the source of truth.
     @ObservationIgnored private(set) var accountAssignmentCount = 0
     @ObservationIgnored private let defaults: UserDefaults?
+    @ObservationIgnored private let clock: any MonotonicClock
+    @ObservationIgnored private let loader: any BoundedDataLoading
     @ObservationIgnored private var download: Task<Void, Never>?
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var avatarFailureCount = 0
+    @ObservationIgnored private var nextAvatarAttemptAt: TimeInterval?
+    @ObservationIgnored private var failedAvatarURL: String?
+    @ObservationIgnored private var failedAvatarUID: String?
     private static let key = "samply.profile.v1"
+    private static let maximumAvatarBytes = 2 * 1024 * 1024
+    private static let avatarFailureDelays: [TimeInterval] = [5, 15, 60]
 
-    init(defaults: UserDefaults? = .standard) {
+    init(defaults: UserDefaults? = .standard,
+         clock: (any MonotonicClock)? = nil,
+         loader: (any BoundedDataLoading)? = nil) {
         self.defaults = defaults
+        self.clock = clock ?? SystemMonotonicClock()
+        self.loader = loader ?? BoundedHTTPDataLoader()
         if let data = defaults?.data(forKey: Self.key),
            let record = try? JSONDecoder().decode(Record.self, from: data) {
             account = record.account
             avatarData = record.avatarData
         }
     }
+
+    var isDownloadingAvatar: Bool { download != nil }
 
     func accept(_ account: WebSnapshot.Account?, authentication: WebAuthenticationState) {
         if authentication == .signedOut { clear(); return }
@@ -38,6 +52,7 @@ final class SamplyProfileCache {
             download?.cancel()
             download = nil
             avatarData = nil
+            resetAvatarFailure()
         }
         let metadataChanged = self.account != account
         if metadataChanged {
@@ -48,23 +63,33 @@ final class SamplyProfileCache {
         guard avatarData == nil, download == nil,
               let value = account.avatarURL, let url = URL(string: value),
               url.scheme?.lowercased() == "https" else { return }
+        if failedAvatarURL == value, failedAvatarUID == account.uid,
+           let nextAvatarAttemptAt, clock.now() < nextAvatarAttemptAt {
+            return
+        }
         let stamp = generation
+        let uid = account.uid
         download = Task { [weak self] in
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.httpShouldSetCookies = false
-            let session = URLSession(configuration: configuration)
-            defer { session.finishTasksAndInvalidate() }
+            guard let self else { return }
             do {
-                let (data, response) = try await session.data(from: url)
-                guard !Task.isCancelled, let self, self.generation == stamp else { return }
+                let data = try await self.loader.data(from: url,
+                                                      maxBytes: Self.maximumAvatarBytes)
+                guard !Task.isCancelled, self.generation == stamp,
+                      self.account?.uid == uid else { return }
                 self.download = nil
-                guard (response as? HTTPURLResponse)?.statusCode == 200,
-                      data.count <= 2 * 1024 * 1024, NSImage(data: data) != nil else { return }
+                guard NSImage(data: data) != nil else {
+                    self.recordAvatarFailure(url: value, uid: uid)
+                    return
+                }
                 self.avatarData = data
+                self.resetAvatarFailure()
                 self.save()
             } catch {
-                guard let self, self.generation == stamp else { return }
+                guard !Task.isCancelled, self.generation == stamp else { return }
                 self.download = nil
+                if !(error is CancellationError) {
+                    self.recordAvatarFailure(url: value, uid: uid)
+                }
             }
         }
     }
@@ -75,7 +100,27 @@ final class SamplyProfileCache {
         download = nil
         account = nil
         avatarData = nil
+        resetAvatarFailure()
         defaults?.removeObject(forKey: Self.key)
+    }
+
+    private func recordAvatarFailure(url: String, uid: String) {
+        if failedAvatarURL != url || failedAvatarUID != uid {
+            avatarFailureCount = 0
+        }
+        failedAvatarURL = url
+        failedAvatarUID = uid
+        let delay = Self.avatarFailureDelays[
+            min(avatarFailureCount, Self.avatarFailureDelays.count - 1)]
+        avatarFailureCount += 1
+        nextAvatarAttemptAt = clock.now() + delay
+    }
+
+    private func resetAvatarFailure() {
+        avatarFailureCount = 0
+        nextAvatarAttemptAt = nil
+        failedAvatarURL = nil
+        failedAvatarUID = nil
     }
 
     private func save() {

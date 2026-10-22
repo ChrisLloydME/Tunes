@@ -77,21 +77,9 @@ struct AlbumDetailView: View {
     private func headerView() -> some View {
         HStack(alignment: .top, spacing: 20) {
             // Thumbnail
-            AsyncImage(url: self.item.artwork.flatMap(URL.init(string:))) { image in
-                image
-                    .resizable()
-                    .scaledToFill()
-            } placeholder: {
-                Rectangle()
-                    .fill(.quaternary)
-                    .overlay {
-                        Image(systemName: "music.note.list")
-                            .font(.system(size: 40))
-                            .foregroundStyle(.secondary)
-                    }
-            }
-            .frame(width: 180, height: 180)
-            .clipShape(.rect(cornerRadius: 8))
+            ProjectArtwork(artwork: self.item.artwork, size: 180, cornerRadius: 8,
+                           placeholderSystemImage: "music.note.list",
+                           placeholderPointSize: 40)
 
             // Info
             VStack(alignment: .leading, spacing: 8) {
