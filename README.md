@@ -47,6 +47,8 @@ These directories belong to one app target. See [Architecture and code navigatio
 - Original-file uploads directly from disk using PUT, preserving required `x-goog-meta-*` headers and Content-Type, with progress, cancellation, and error states. Files added after creation use an ordered, awaitable queue with per-file phases and uncertainty, surfaced in the sheet or a Library notice. Cancellation before submission is retryable; a ticket or PUT that may have reached Samply is not blindly retried.
 - Cleanup of native state, saved tokens, upload tasks, and the corresponding WebKit session when accounts change or the user signs out.
 
+Project creation currently requires at least one owned project to establish that the PAT belongs to the signed-in web account. Accounts with no owned projects must create their first project on Samply's website before verifying the PAT in Tunes. A successful artwork PUT remains “submitted; confirmation pending” until local tracking is explicitly abandoned; Library refresh cannot prove artwork assignment. Abandoning tracking does not delete remote content. Quarantined creation results can be explicitly acknowledged and abandoned without repeating creation or allowing optional writes.
+
 ## Local signing
 
 Tunes is currently built for local development and personal use with the owner's free Apple developer account (Personal Team). Debug, Release, and test targets all use automatic signing with `Apple Development` and the existing team `YM5G2M8PV9`. Release selects optimized code; it does not imply Developer ID distribution or notarization. Neither Developer ID signing nor notarization is part of this workflow.
