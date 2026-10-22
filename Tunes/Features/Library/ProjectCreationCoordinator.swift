@@ -129,6 +129,7 @@ final class ProjectCreationCoordinator {
     @ObservationIgnored private var initialUploadTask: Task<Void, Never>?
     @ObservationIgnored var onLibraryRefreshed: (([LibraryItem]) -> Void)?
     @ObservationIgnored var onProjectOpened: ((LibraryItem, WebSnapshot) -> Void)?
+    @ObservationIgnored var onBackgroundOutcome: (() -> Void)?
 
     init(api: any ProjectCreatingAPI, web: any ProjectCreationWebSession,
          fileUploader: any ProjectFileUploading) {
@@ -173,15 +174,31 @@ final class ProjectCreationCoordinator {
         }
     }
 
-    var canFinishCreatedProject: Bool {
-        guard case .created = state,
-              !isUploadingInitialFiles, !artworkState.isBusy else { return false }
-        return !initialFiles.contains {
+    var hasUnresolvedInitialFiles: Bool {
+        initialFiles.contains {
             switch $0.status {
             case .failed, .uncertain, .cancelled: return true
             default: return false
             }
         }
+    }
+
+    var hasUnresolvedArtwork: Bool {
+        switch artworkState {
+        case .failed, .uncertain, .unsupported: return true
+        default: return false
+        }
+    }
+
+    var hasUnresolvedCreatedWork: Bool {
+        hasUnresolvedInitialFiles || hasUnresolvedArtwork
+    }
+
+    var canFinishCreatedProject: Bool {
+        guard case .created = state,
+              !isUploadingInitialFiles, !artworkState.isBusy,
+              !hasUnresolvedCreatedWork else { return false }
+        return true
     }
 
     var canRetryArtwork: Bool {
@@ -258,6 +275,7 @@ final class ProjectCreationCoordinator {
                                                    accountID: accountID)
                 }
             }
+            notifyBackgroundOutcome()
             await refreshAfterCreation(created, ticket: ticket)
         } catch {
             guard isCurrent(ticket, accountID: accountID) else { return }
@@ -379,13 +397,23 @@ final class ProjectCreationCoordinator {
             await self?.uploadPendingFiles(projectID: created.project.id,
                                            accountID: created.accountID)
         }
+        notifyBackgroundOutcome()
         return true
+    }
+
+    /// Abandons local tracking of a confirmed project without deleting or
+    /// recreating anything in Samply. Used when a failed upload must not block a
+    /// new project.
+    func discardConfirmedCreation() {
+        guard case .created = state, !isUploadingInitialFiles else { return }
+        invalidate()
     }
 
     func cancelInitialUploads() {
         guard isUploadingInitialFiles else { return }
         initialUploadTask?.cancel()
         markRemainingInitialFilesCancelled()
+        notifyBackgroundOutcome()
     }
 
     func retryFailedInitialFiles() {
@@ -407,10 +435,14 @@ final class ProjectCreationCoordinator {
             await self?.uploadPendingFiles(projectID: created.project.id,
                                            accountID: created.accountID)
         }
+        notifyBackgroundOutcome()
     }
 
     private func uploadPendingFiles(projectID: String, accountID: String) async {
-        defer { initialUploadTask = nil }
+        defer {
+            initialUploadTask = nil
+            notifyBackgroundOutcome()
+        }
         while !Task.isCancelled,
               let index = initialFiles.firstIndex(where: { $0.status == .pending }) {
             guard isCurrentAccount(accountID),
@@ -480,10 +512,14 @@ final class ProjectCreationCoordinator {
         artworkTask = Task { [weak self] in
             await self?.assignArtwork(payload, accountID: created.accountID)
         }
+        notifyBackgroundOutcome()
     }
 
     private func assignArtwork(_ payload: ProjectArtworkPayload, accountID: String) async {
-        defer { artworkTask = nil }
+        defer {
+            artworkTask = nil
+            notifyBackgroundOutcome()
+        }
         guard let project = createdProject, isCurrentAccount(accountID) else { return }
         do {
             let result: ArtworkResult = try await web.call("setProjectArtwork", arguments: [
@@ -531,11 +567,18 @@ final class ProjectCreationCoordinator {
         }
     }
 
-    /// Clears a failed or completed sheet. A confirmed creation that still needs
-    /// a Library refresh or navigation is retained so it cannot become a duplicate.
+    private func notifyBackgroundOutcome() {
+        onBackgroundOutcome?()
+    }
+
+    /// Clears a failed or completed sheet. A confirmed creation with unresolved
+    /// background work is retained until the user retries or starts over.
     func reset() {
         switch state {
-        case .idle, .failed, .created(_, .opened):
+        case .idle, .failed:
+            invalidate()
+        case .created:
+            guard canFinishCreatedProject else { return }
             invalidate()
         default:
             return
@@ -554,6 +597,7 @@ final class ProjectCreationCoordinator {
         initialFiles = []
         isRefreshingAfterUncertain = false
         state = .idle
+        notifyBackgroundOutcome()
     }
 
     /// Creation stays on the Library screen. Refresh its complete history in

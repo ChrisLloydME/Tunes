@@ -125,7 +125,7 @@ struct ProjectCreationTests {
         #expect(web.calls.filter { $0.command == "refreshPage" }.count == 2)
     }
 
-    @Test func interruptedRefreshKeepsTheConfirmedProjectRetryable() async {
+    @Test func interruptedRefreshCanBeDismissedWithoutAnotherCreate() async {
         let web = StubCreationWeb(libraryResponses: [.failure(CancellationError())])
         let api = StubProjectAPI(result: .success(project()))
         let coordinator = ProjectCreationCoordinator(api: api, web: web, fileUploader: StubFileUploader())
@@ -142,7 +142,8 @@ struct ProjectCreationTests {
         #expect(!coordinator.blocksDismissal)
 
         coordinator.reset()
-        #expect(coordinator.createdProject?.project.id == "project-1")
+        #expect(coordinator.createdProject == nil)
+        #expect(coordinator.state == .idle)
     }
 
     @Test func ambiguousNetworkFailureIsNeverResubmitted() async {
@@ -263,6 +264,8 @@ struct ProjectCreationTests {
         }
         #expect(api.names.count == 1)
         #expect(coordinator.createdProject?.project.id == "project-1")
+        #expect(coordinator.hasUnresolvedArtwork)
+        #expect(!coordinator.canFinishCreatedProject)
         guard case .created(_, .refreshFailed) = coordinator.state else {
             Issue.record("Expected the creation to survive the refresh failure")
             return
@@ -419,6 +422,26 @@ struct ProjectCreationTests {
             .uploaded(boxID: "box-2-retry"),
             .uploaded(boxID: "box-3")
         ])
+    }
+
+    @Test func failedUploadCanBeDiscardedWithoutAnotherCreate() async throws {
+        let file = try temporaryFile("Failed Mix.wav")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let web = StubCreationWeb(libraryResponses: [.success(snapshot())])
+        let api = StubProjectAPI(result: .success(project()))
+        let uploader = StubFileUploader()
+        uploader.results = [.failure(SamplyError.invalidResponse)]
+        let coordinator = ProjectCreationCoordinator(api: api, web: web, fileUploader: uploader)
+
+        await coordinator.create(name: "Album")
+        #expect(coordinator.addFiles([file]))
+        await waitUntil { !coordinator.isUploadingInitialFiles }
+
+        #expect(coordinator.hasUnresolvedInitialFiles)
+        #expect(!coordinator.canFinishCreatedProject)
+        coordinator.discardConfirmedCreation()
+        #expect(coordinator.state == .idle)
+        #expect(api.names == ["Album"])
     }
 
     @Test func accountChangeStopsPendingInitialUploads() async throws {

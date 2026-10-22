@@ -357,6 +357,19 @@ struct NewProjectSheet: View {
                     .buttonStyle(.bordered)
                 }
             }
+
+            if !creation.canFinishCreatedProject, !creation.isUploadingInitialFiles {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("This project remains in Samply.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Start New Project") {
+                        startNewProject()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(pagePadding)
@@ -639,6 +652,17 @@ struct NewProjectSheet: View {
                 }
             }
         }
+    }
+
+    private func startNewProject() {
+        creation.discardConfirmedCreation()
+        filesToUpload = []
+        name = ""
+        validationMessage = nil
+        artworkStore.remove()
+        cancelPhotoLoad()
+        page = .details
+        nameFieldFocused = true
     }
 
     private func uploadSelectedFiles() {

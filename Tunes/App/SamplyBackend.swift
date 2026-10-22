@@ -2,6 +2,13 @@ import AppKit
 import Foundation
 import Observation
 
+struct ProjectCreationNotice: Identifiable, Equatable {
+    let id = UUID()
+    let message: String
+    let canRetryUploads: Bool
+    let canRetryArtwork: Bool
+}
+
 /// Composition root for the current web-session and REST integration.
 @MainActor
 @Observable
@@ -23,6 +30,7 @@ final class SamplyBackend {
     private(set) var hasToken = false
     private(set) var error: String?
     private(set) var hasTransientError = false
+    private(set) var projectCreationNotice: ProjectCreationNotice?
     @ObservationIgnored private let tokens: any TokenStore
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var browseTask: Task<Void, Never>?
@@ -48,6 +56,9 @@ final class SamplyBackend {
         }
         projectCreation.onProjectOpened = { [weak self] item, snapshot in
             self?.acceptCreatedProject(item, snapshot)
+        }
+        projectCreation.onBackgroundOutcome = { [weak self] in
+            self?.refreshProjectCreationNotice()
         }
     }
 
@@ -219,6 +230,61 @@ final class SamplyBackend {
         uploader.reset()
         hasToken = false
         try tokens.remove()
+    }
+
+    func retryProjectUploads() {
+        projectCreation.retryFailedInitialFiles()
+    }
+
+    func retryProjectArtwork() {
+        projectCreation.retryArtwork()
+    }
+
+    func dismissProjectCreationNotice() {
+        projectCreationNotice = nil
+    }
+
+    private func refreshProjectCreationNotice() {
+        guard let created = projectCreation.createdProject else {
+            projectCreationNotice = nil
+            return
+        }
+        let name = created.project.name
+        var parts: [String] = []
+        let failedFiles = projectCreation.initialFiles.filter {
+            switch $0.status {
+            case .failed, .cancelled: return true
+            default: return false
+            }
+        }.count
+        let uncertainFiles = projectCreation.initialFiles.filter {
+            if case .uncertain = $0.status { return true }
+            return false
+        }.count
+        if failedFiles > 0 {
+            parts.append("\(failedFiles) file\(failedFiles == 1 ? "" : "s") from “\(name)” did not upload.")
+        }
+        if uncertainFiles > 0 {
+            parts.append("\(uncertainFiles) upload\(uncertainFiles == 1 ? "" : "s") for “\(name)” could not be confirmed and may already be in the project.")
+        }
+        switch projectCreation.artworkState {
+        case .failed:
+            parts.append("Artwork was not assigned to “\(name)”.")
+        case .uncertain:
+            parts.append("Artwork for “\(name)” could not be confirmed.")
+        case .unsupported:
+            parts.append("Artwork could not be assigned to “\(name)” by this Samply web build.")
+        default:
+            break
+        }
+        guard !parts.isEmpty else {
+            projectCreationNotice = nil
+            return
+        }
+        projectCreationNotice = ProjectCreationNotice(
+            message: parts.joined(separator: " "),
+            canRetryUploads: projectCreation.canRetryInitialFiles,
+            canRetryArtwork: projectCreation.canRetryArtwork)
     }
 
     func chooseUpload() {

@@ -191,10 +191,18 @@ struct ContentView: View {
         } else if !backend.libraryReady {
             ProgressView("Loading your Samply library…")
         } else {
-            LibraryView(items: backend.library, isOpeningProject: backend.isPlayingSelection) { item in
-                backend.select(item)
-                showsProject = true
-            }
+            LibraryView(
+                items: backend.library,
+                isOpeningProject: backend.isPlayingSelection,
+                creationNotice: backend.projectCreationNotice,
+                retryProjectUploads: backend.retryProjectUploads,
+                retryProjectArtwork: backend.retryProjectArtwork,
+                dismissCreationNotice: backend.dismissProjectCreationNotice,
+                openProject: { item in
+                    backend.select(item)
+                    showsProject = true
+                }
+            )
         }
     }
 
