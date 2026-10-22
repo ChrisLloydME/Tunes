@@ -848,7 +848,10 @@ struct ProjectCreationTests {
         uploader.releaseUpload()
         await waitUntil { !coordinator.isUploadingInitialFiles }
         #expect(uploader.calls == ["First.wav"])
-        #expect(coordinator.initialFiles.allSatisfy(\.isRetryable))
+        // Swift Testing's function-call macro expansion treats `allSatisfy` as
+        // rethrowing with a key-path argument in this toolchain; evaluate it first.
+        let allFilesRetryable = coordinator.initialFiles.allSatisfy(\.isRetryable)
+        #expect(allFilesRetryable)
         #expect(coordinator.canRetryInitialFiles)
 
         coordinator.retryFailedInitialFiles()

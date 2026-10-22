@@ -35,6 +35,8 @@ final class SamplyBackend {
     private(set) var hasTransientError = false
     private(set) var projectCreationNotice: ProjectCreationNotice?
     @ObservationIgnored private let tokens: any TokenStore
+    @ObservationIgnored let diagnostics: SamplyDiagnostics
+    @ObservationIgnored private let clock: any MonotonicClock
     @ObservationIgnored private var monitor: Task<Void, Never>?
     @ObservationIgnored private var browseTask: Task<Void, Never>?
     @ObservationIgnored private var playTask: Task<Void, Never>?
@@ -42,11 +44,17 @@ final class SamplyBackend {
     @ObservationIgnored private var sessionGeneration: UInt64 = 0
     @ObservationIgnored private var accountID: String?
     @ObservationIgnored private var hasResolvedTokenAccount = false
+    @ObservationIgnored private var sessionStartedAt: TimeInterval?
+    @ObservationIgnored private var hasRecordedSessionRestoration = false
+    @ObservationIgnored private var hasRecordedLibraryAcceptance = false
 
-    init(tokens: (any TokenStore)? = nil) {
+    init(tokens: (any TokenStore)? = nil, diagnostics: SamplyDiagnostics? = nil,
+         clock: (any MonotonicClock)? = nil) {
         let tokens = tokens ?? FileTokenStore.applicationStore()
         self.tokens = tokens
-        let web = SamplyWebSession()
+        self.diagnostics = diagnostics ?? .shared
+        self.clock = clock ?? SystemMonotonicClock()
+        let web = SamplyWebSession(diagnostics: diagnostics)
         self.web = web
         let api = SamplyAPI(tokens: tokens)
         self.api = api
@@ -79,6 +87,7 @@ final class SamplyBackend {
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
               NSClassFromString("XCTestCase") == nil else { return }
         guard monitor == nil else { return }
+        sessionStartedAt = clock.now()
         web.start()
         playback.registerMediaKeys()
         monitor = Task { [weak self] in
@@ -108,7 +117,18 @@ final class SamplyBackend {
             hasResolvedTokenAccount = true
         }
         guard newAccount != nil else { return }
-        if state.libraryReady { library = state.library }
+        if !hasRecordedSessionRestoration, let sessionStartedAt {
+            record(.sessionRestoration, since: sessionStartedAt)
+            hasRecordedSessionRestoration = true
+        }
+        if state.libraryReady {
+            if !hasRecordedLibraryAcceptance, let sessionStartedAt {
+                record(.libraryAcceptance, since: sessionStartedAt,
+                       itemCount: state.library.count)
+                hasRecordedLibraryAcceptance = true
+            }
+            library = state.library
+        }
         playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
            state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id,
@@ -116,6 +136,15 @@ final class SamplyBackend {
             boxes = state.boxes
             albumLoadState = .loaded
         }
+    }
+
+    /// Diagnostics carry only fixed stages and counts; never names, URLs, or IDs.
+    private func record(_ stage: SamplyDiagnosticStage, since start: TimeInterval,
+                        itemCount: Int = 0, outcome: SamplyDiagnosticOutcome = .success) {
+        guard diagnostics.isEnabled else { return }
+        diagnostics.record(SamplyDiagnosticSample(
+            stage: stage, operationID: diagnostics.nextOperationID(),
+            duration: clock.now() - start, itemCount: itemCount, outcome: outcome))
     }
 
     var needsActionRecovery: Bool { hasTransientError || playback.hasTransientError }
@@ -154,6 +183,7 @@ final class SamplyBackend {
         browseTask?.cancel()
         selectionGeneration += 1
         let generation = selectionGeneration
+        let startedAt = clock.now()
         boxes = []
         isBrowsing = true
         albumLoadState = .loading
@@ -172,8 +202,10 @@ final class SamplyBackend {
                                         expectedProjectID: item.projectID) {
                     boxes = state.boxes
                     albumLoadState = .loaded
+                    record(.selection, since: startedAt, itemCount: state.boxes.count)
                 } else {
                     albumLoadState = .failed
+                    record(.selection, since: startedAt, outcome: .failure)
                     recordFailure(SamplyError.invalidResponse)
                 }
                 isBrowsing = false
@@ -181,7 +213,10 @@ final class SamplyBackend {
                 guard generation == selectionGeneration else { return }
                 isBrowsing = false
                 albumLoadState = .failed
-                if !Task.isCancelled { recordFailure(error) }
+                if !Task.isCancelled {
+                    record(.selection, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
+                    recordFailure(error)
+                }
             }
         }
     }
@@ -198,6 +233,7 @@ final class SamplyBackend {
         guard albumLoadState == .loaded, !isBrowsing, !isPlayingSelection, box.isAudio, !box.isProcessing,
               let selectedItem else { return }
         let generation = selectionGeneration
+        let startedAt = clock.now()
         isPlayingSelection = true
         error = nil
         hasTransientError = false
@@ -210,8 +246,14 @@ final class SamplyBackend {
                 try Task.checkCancellation()
                 guard generation == selectionGeneration else { return }
                 playback.apply(state.playback, libraryItem: selectedItem)
+                let reachedRequestedTrack = playback.state.fileID == box.id && !playback.state.loading
+                record(.playbackStart, since: startedAt, itemCount: reachedRequestedTrack ? 1 : 0,
+                       outcome: reachedRequestedTrack ? .success : .failure)
             } catch {
-                if generation == selectionGeneration, !Task.isCancelled { recordFailure(error) }
+                if generation == selectionGeneration, !Task.isCancelled {
+                    record(.playbackStart, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
+                    recordFailure(error)
+                }
             }
             if generation == selectionGeneration { isPlayingSelection = false }
         }
@@ -348,6 +390,7 @@ final class SamplyBackend {
         guard isConnected, !isRefreshing, !isBrowsing, !isPlayingSelection else { return }
         let generation = selectionGeneration
         let account = web.snapshot?.account?.uid
+        let startedAt = clock.now()
         isRefreshing = true
         defer { isRefreshing = false }
         do {
@@ -360,6 +403,7 @@ final class SamplyBackend {
             case .library:
                 guard state.libraryReady else { throw SamplyError.invalidResponse }
                 library = state.library
+                record(.serverRefresh, since: startedAt, itemCount: state.library.count)
             case .album(let routeID, let groupID):
                 guard generation == selectionGeneration, let selectedItem,
                       selectedItem.routeID == routeID, folderPath.last?.id == groupID else { return }
@@ -369,6 +413,7 @@ final class SamplyBackend {
                 }
                 boxes = state.boxes
                 albumLoadState = .loaded
+                record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
             }
             // Refresh only updates page data. The media engine and native playback stay intact.
             error = nil
@@ -376,6 +421,7 @@ final class SamplyBackend {
         } catch is CancellationError { }
         catch {
             if generation == selectionGeneration, account == web.snapshot?.account?.uid {
+                record(.serverRefresh, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
                 recordFailure(error)
             }
         }

@@ -23,12 +23,24 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private var bridgeHealth = SamplyBridgeHealth()
     @ObservationIgnored private var isRefreshingSnapshot = false
     @ObservationIgnored private var pageBackgroundObservation: NSKeyValueObservation?
+    @ObservationIgnored let diagnostics: SamplyDiagnostics
+    @ObservationIgnored let clock: any MonotonicClock
+    @ObservationIgnored private var transportOverride: (any SamplyBridgeTransport)?
+    @ObservationIgnored private var pendingInvocations: [UInt64: PendingBridgeInvocation] = [:]
 
-    var pollInterval: Duration { bridgeHealth.pollInterval(at: ProcessInfo.processInfo.systemUptime) }
+    var pollInterval: Duration { bridgeHealth.pollInterval(at: clock.now()) }
     @ObservationIgnored private let script: String
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
+    @ObservationIgnored private lazy var webKitTransport = WebKitBridgeTransport(webView: webView, script: script)
 
-    override init() {
+    override convenience init() {
+        self.init(diagnostics: nil, transport: nil)
+    }
+
+    init(diagnostics: SamplyDiagnostics?, transport: (any SamplyBridgeTransport)? = nil) {
+        self.diagnostics = diagnostics ?? .shared
+        clock = SystemMonotonicClock()
+        transportOverride = transport
         let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil ||
             NSClassFromString("XCTestCase") != nil
         profile = SamplyProfileCache(defaults: isTesting ? nil : .standard)
@@ -123,9 +135,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         loadSession()
         makeWindowIfNeeded()
         if restartsSignIn {
-            generation += 1
+            beginNewDocumentGeneration()
             authenticationState = .checking
-            connectionError = nil
             webView.stopLoading()
             webView.load(URLRequest(url: URL(string: "https://samply.app/library")!,
                                     cachePolicy: .reloadIgnoringLocalCacheData))
@@ -172,9 +183,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard !isSigningOut else { throw EmailSignInLinkError.signingOut }
         guard snapshot?.account == nil else { throw EmailSignInLinkError.alreadyConnected }
         let url = try SamplyEmailSignInLink.parse(input)
-        generation += 1
+        beginNewDocumentGeneration()
         authenticationState = .checking
-        connectionError = nil
         // Loading in this WebView preserves Samply's emailForSignIn and existing auth state.
         // Do not preflight the one-time link or send it through a separate URLSession.
         hasStarted = true
@@ -222,55 +232,148 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         } catch {
             guard generation == stamp, !isSigningOut, !(error is CancellationError) else { return false }
             if error is SamplyBridgeError,
-               !bridgeHealth.recordFailure(at: ProcessInfo.processInfo.systemUptime) { return false }
+               !bridgeHealth.recordFailure(at: clock.now()) { return false }
             connectionError = error.localizedDescription
             return false
         }
     }
 
     func call<T: Decodable>(_ command: String, arguments: [String: Any] = [:]) async throws -> T {
-        guard !isSigningOut, !script.isEmpty, webView.url?.host == "samply.app",
-              webView.url?.scheme == "https" else { throw SamplyError.bridgeUnavailable }
+        guard !isSigningOut else { throw CancellationError() }
+        if transportOverride == nil {
+            guard !script.isEmpty, webView.url?.host == "samply.app",
+                  webView.url?.scheme == "https" else { throw SamplyError.bridgeUnavailable }
+        }
         let stamp = generation
+        let operationID = diagnostics.nextOperationID()
+        let category = SamplyDiagnosticCommand(command: command)
+        let startedAt = clock.now()
         let result: Any?
         do {
-            result = try await webView.callAsyncJavaScript("""
-            try {
-            if (!window.__tunesSamply) { \(script) }
-            if (!window.__tunesSamply) throw new Error('Samply adapter unavailable.');
-            return JSON.stringify({payload: await window.__tunesSamply.command(command, args)});
-            } catch (error) {
-                // Never send arbitrary page exception text (which can contain URLs or credentials).
-                const code = error?.code;
-                const rejected = code === 'TUNES_OPERATION_FAILED' ||
-                    ['permission-denied', 'unauthenticated', 'not-found', 'functions/permission-denied',
-                     'functions/unauthenticated', 'functions/not-found'].includes(code);
-                return JSON.stringify({failure: code === 'TUNES_NOT_READY' ? 'notReady' : rejected ? 'operationFailed' : 'executionFailed'});
-            }
-            """, arguments: ["command": command, "args": arguments], in: nil, contentWorld: .page)
+            result = try await invoke(command: command, arguments: arguments, operationID: operationID)
         } catch {
+            let mapped: Error
+            if error is CancellationError { mapped = error }
+            else if let bridge = error as? SamplyBridgeError { mapped = bridge }
+            else { mapped = SamplyBridgeError.executionFailed }
+            recordInvocation(category, operationID, startedAt, bytes: 0,
+                             outcome: SamplyDiagnosticOutcome(mapped))
             guard generation == stamp, !isSigningOut else { throw CancellationError() }
-            throw SamplyBridgeError.executionFailed
+            throw mapped
         }
         guard generation == stamp, !isSigningOut else { throw CancellationError() }
-        guard let value = result as? String, let data = value.data(using: .utf8) else { throw SamplyError.invalidResponse }
-        let response = try JSONDecoder().decode(SamplyBridgeResponse<T>.self, from: data)
-        if response.failure == "notReady" { throw SamplyBridgeError.notReady }
-        if response.failure == "operationFailed" { throw SamplyBridgeError.operationFailed }
-        if response.failure != nil { throw SamplyBridgeError.executionFailed }
-        guard let payload = response.payload else { throw SamplyError.invalidResponse }
+        guard let value = result as? String, let data = value.data(using: .utf8) else {
+            recordInvocation(category, operationID, startedAt, bytes: 0, outcome: .failure)
+            throw SamplyError.invalidResponse
+        }
+        let decodeStartedAt = clock.now()
+        let response: SamplyBridgeResponse<T>
+        do {
+            response = try JSONDecoder().decode(SamplyBridgeResponse<T>.self, from: data)
+        } catch {
+            diagnostics.record(SamplyDiagnosticSample(
+                stage: .responseDecoding, command: category, operationID: operationID,
+                duration: clock.now() - decodeStartedAt, responseBytes: data.count,
+                outcome: .failure))
+            recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .failure)
+            throw SamplyError.invalidResponse
+        }
+        diagnostics.record(SamplyDiagnosticSample(
+            stage: .responseDecoding, command: category, operationID: operationID,
+            duration: clock.now() - decodeStartedAt, responseBytes: data.count))
+        if let failure = response.failure {
+            let error = Self.bridgeError(for: failure)
+            recordInvocation(category, operationID, startedAt, bytes: data.count,
+                             outcome: SamplyDiagnosticOutcome(error))
+            throw error
+        }
+        guard let payload = response.payload else {
+            recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .failure)
+            throw SamplyError.invalidResponse
+        }
+        recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .success)
         return payload
+    }
+
+    /// Fixed mappings only. Arbitrary page exception text never reaches native UI.
+    private static func bridgeError(for failure: String) -> SamplyBridgeError {
+        switch failure {
+        case "notReady": .notReady
+        case "contractMismatch": .contractMismatch
+        case "accessDenied": .accessDenied
+        case "superseded": .superseded
+        case "timedOut": .timedOut
+        case "operationFailed": .operationFailed
+        default: .executionFailed
+        }
+    }
+
+    private func recordInvocation(_ category: SamplyDiagnosticCommand?, _ operationID: UInt64,
+                                  _ startedAt: TimeInterval, bytes: Int,
+                                  outcome: SamplyDiagnosticOutcome) {
+        diagnostics.record(SamplyDiagnosticSample(
+            stage: .bridgeInvocation, command: category, operationID: operationID,
+            duration: clock.now() - startedAt, responseBytes: bytes, outcome: outcome))
+    }
+
+    /// The entire native invocation is settled exactly once by the registry:
+    /// a late WebKit completion after cancellation is ignored.
+    private func invoke(command: String, arguments: [String: Any],
+                        operationID: UInt64) async throws -> Any? {
+        let stamp = generation
+        let transport = transportOverride ?? webKitTransport
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pendingInvocations[operationID] = PendingBridgeInvocation(generation: stamp,
+                                                                          continuation: continuation)
+                transport.invoke(command: command, arguments: arguments) { [weak self] result in
+                    self?.finishInvocation(operationID, result: result)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.finishInvocation(operationID, result: .failure(CancellationError()))
+            }
+        }
+    }
+
+    private func finishInvocation(_ operationID: UInt64, result: Result<Any?, Error>) {
+        guard let pending = pendingInvocations.removeValue(forKey: operationID) else { return }
+        guard pending.generation == generation else {
+            pending.continuation.resume(throwing: CancellationError())
+            return
+        }
+        pending.continuation.resume(with: result)
+    }
+
+    /// Invalidates in-flight bridge work when the document changes. A late
+    /// callback from the previous document must never settle a newer request.
+    func beginNewDocumentGeneration() {
+        generation += 1
+        bridgeHealth.reset()
+        connectionError = nil
+        cancelPendingInvocations()
+    }
+
+    private func cancelPendingInvocations() {
+        let pending = pendingInvocations
+        pendingInvocations.removeAll()
+        for entry in pending.values {
+            entry.continuation.resume(throwing: CancellationError())
+        }
     }
 
     func signOut() async {
         dismissSignIn()
         profile.clear()
         isSigningOut = true
-        bridgeHealth.reset()
+        beginNewDocumentGeneration()
         authenticationState = .checking
-        generation += 1
         snapshot = nil
-        connectionError = nil
         webView.stopLoading()
         await webView.pauseAllMediaPlayback()
         for popup in popupWindows { popup.close() }
@@ -287,9 +390,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard webView === self.webView else { return }
-        generation += 1
-        bridgeHealth.reset()
-        connectionError = nil
+        beginNewDocumentGeneration()
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
@@ -308,7 +409,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         guard webView === self.webView else { return }
-        generation += 1
+        beginNewDocumentGeneration()
         snapshot = nil
         authenticationState = .checking
         connectionError = "The Samply web process stopped. Reloading…"
@@ -350,6 +451,11 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         if sender === window { sender.orderOut(nil); return false }
         return true
     }
+}
+
+private struct PendingBridgeInvocation {
+    let generation: Int
+    let continuation: CheckedContinuation<Any?, Error>
 }
 
 private struct SamplyBridgeResponse<Payload: Decodable>: Decodable {

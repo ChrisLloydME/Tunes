@@ -18,13 +18,27 @@ struct SamplyBridgeHealth {
     }
 }
 
-enum SamplyBridgeError: LocalizedError {
-    case notReady, executionFailed, operationFailed
+enum SamplyBridgeError: LocalizedError, Equatable {
+    /// The page is still initializing; a later poll or startup read may succeed.
+    case notReady
+    /// The pinned web build no longer exposes a required contract for one feature.
+    /// This is terminal for that feature until the document changes.
+    case contractMismatch
+    /// Samply rejected the account, permission, or resource.
+    case accessDenied
+    /// A newer navigation or selection made this operation obsolete.
+    case superseded
+    /// The complete native invocation exceeded its deadline.
+    case timedOut
+    /// WebKit failed before the adapter could answer.
+    case executionFailed
+    /// The adapter rejected an otherwise valid command.
+    case operationFailed
 
     var isTransient: Bool {
         switch self {
-        case .notReady, .executionFailed: true
-        case .operationFailed: false
+        case .notReady, .executionFailed, .timedOut: true
+        case .contractMismatch, .accessDenied, .superseded, .operationFailed: false
         }
     }
 
@@ -32,6 +46,14 @@ enum SamplyBridgeError: LocalizedError {
         switch self {
         case .notReady:
             "Samply is still initializing. Open the Samply window to check its loading status."
+        case .contractMismatch:
+            "This Samply web build no longer supports part of the Tunes integration. Other features remain available."
+        case .accessDenied:
+            "Samply denied access to this item. Check your account and sharing permissions."
+        case .superseded:
+            "A newer request replaced this action."
+        case .timedOut:
+            "Samply did not answer in time. Open the Samply window to check your sign-in and access permissions."
         case .executionFailed:
             "Could not read or update the Samply web player. Open the Samply window and try again."
         case .operationFailed:

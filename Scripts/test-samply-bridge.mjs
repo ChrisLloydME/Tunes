@@ -1,89 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {readFileSync} from 'node:fs';
+import {fixture, script} from './samply-bridge-fixture.mjs';
 
-const script = readFileSync(new URL('../Tunes/Resources/SamplyBridge.js', import.meta.url), 'utf8');
-function fixture({origin = 'https://samply.app', anonymous = false} = {}) {
-    const calls = [];
-    const file = {id: 'file-1', name: 'Mix', data: {type: 'file', mimeType: 'audio/wav'},
-        activeid: 'file-1', activeData: {audio: {duration: 120}}, isAudio: true, duration: 120};
-    const raw = {type: 'file', mimeType: 'audio/wav', audio: {duration: 120}};
-    const audio = {
-        audioboxid: undefined, metadata: {title: 'Mix'}, loading: false, playing: false,
-        currentTime: 5, duration: 120, volume: 0.7, queue: [{id: 'file-1'}, {id: 'file-2'}],
-        play() { calls.push(['play']); this.playing = true; },
-        pause() { calls.push(['pause']); this.playing = false; },
-        seek(value) { calls.push(['seek', value]); this.currentTime = value; },
-        setVolume(value) { calls.push(['volume', value]); this.volume = value; },
-        skipNext() { calls.push(['next']); }, skipPrevious() { calls.push(['previous']); },
-        selectQuality(value, options) { calls.push(['quality', value, options]); },
-        async loadBox(box, options) {
-            calls.push(['loadBox', box, options]); this.audioboxid = box.id; this.playing = true;
-        }
-    };
-    const player = {shareid: 'share-1', playerid: 'player-1', parentProjectID: 'project-1',
-        allowVersions: true, playerDocumentData: {name: 'Shared'}, playerBoxesLoading: false,
-        parentProjectData: {name: 'Project'}, defaultQuality: 'lossless'};
-    const boxes = {loadingBoxes: false, boxViewModelsCurrentLevel: [file], audioBoxes: [{id: file.id, data: raw}],
-        getBox(id, viewModel = true) { return id === file.id ? viewModel ? file : raw : undefined; },
-        getPlayableBoxViewModel(value) { return value; }, getBoxVersions() { return [file]; },
-        isBoxProcessing() { return false; }};
-    const auth = {uid: 'user-a', isAnonymous: anonymous, userSnippet: {displayName: 'Test'},
-        user: {accessToken: 'NEVER_SERIALIZE_THIS'}};
-    const library = {loading: false, items: [
-        {id: 'project-1', projectid: 'project-1', playerid: 'project-1', shareid: 'own-share', name: 'Owned', owner: 'user-a'},
-        {id: 'player-1', projectid: 'project-1', playerid: 'player-1', shareid: 'share-1', name: 'Shared', owner: 'user-b'},
-        {id: 'archive', name: 'Archive', archived: true}
-    ], canUploadFilesInProject(id) { return id === 'project-1'; }};
-    const stores = new Map([['profile-auth-module', auth], ['library', library], ['player', player],
-        ['boxes', boxes], ['audio-module', audio]]);
-    const router = {currentRoute: {value: {params: {shareid: 'share-1'}}},
-        async push(route) {
-            calls.push(['navigate', route]);
-            // The player view resolves a token-bearing external link to the live
-            // share route and removes the token from the URL.
-            const token = route.query?.token;
-            const shareid = token ? 'share-1' : decodeURIComponent(route.path.split('/').pop());
-            const {token: _discarded, ...query} = route.query ?? {};
-            this.currentRoute.value.path = token ? `/p/${shareid}` : route.path;
-            this.currentRoute.value.params.shareid = shareid;
-            this.currentRoute.value.query = query;
-            player.shareid = shareid; boxes.currentLevelId = query.group;
-        }};
-    const server = {library: [], boxes: [], projectDocs: {
-        'project-1': {owner: 'user-a', roles: {'user-a': {role: 'admin'}}, artwork: undefined}
-    }};
-    const dataAPI = {
-        a9: () => ({}), a7: {USERS: 'users', HISTORY: 'history', PROJECTS: 'projects', BOXES: 'boxes'},
-        a6: (_db, ...path) => ({path}), a3: (collection, filter) => ({...collection, filter}),
-        a5: (...args) => args, aJ: (_db, ...path) => ({path}),
-        async dZ(query) {
-            calls.push(['serverRead', query]);
-            return {docs: query.path[0] === 'users' ? server.library : server.boxes};
-        },
-        async dW(ref) {
-            calls.push(['serverDoc', ref]);
-            const data = server.projectDocs[ref.path.at(-1)];
-            return {exists: () => data !== undefined, data: () => data};
-        },
-        at: () => ({async getSecurePlayerBoxContent(args) {
-            calls.push(['sharedRead', args]); return {boxes: server.boxes.map(doc => ({id: doc.id, data: doc.data()}))};
-        }})
-    };
-    const context = {location: {origin}, URL, setTimeout, clearTimeout, File, atob,
-        // Replace only the module-loading boundary; all adapter behavior runs unchanged.
-        __fixtureImport: async () => dataAPI,
-        document: {querySelector(selector) {
-            if (selector === 'script[type="module"][src]') return {src: origin + '/assets/index.1817c5c9.js'};
-            return {__vue_app__: {config: {globalProperties: {$pinia: {_s: stores}, $router: router}}}};
-        }}};
-    context.window = context;
-    context.top = context;
-    vm.createContext(context);
-    vm.runInContext(script.replace('import(moduleURL.href)', '__fixtureImport(moduleURL.href)'), context);
-    return {bridge: context.__tunesSamply, context, calls, audio, player, boxes, stores, auth, library, router, server, dataAPI};
-}
 const plain = value => JSON.parse(JSON.stringify(value));
 
 test('profile snapshot includes only display metadata and tolerates missing profile fields', async () => {
@@ -554,4 +473,43 @@ test('refreshing a temporarily loading album remains retryable without touching 
     const result = await f.bridge.command('refreshPage', {page: 'album', routeID: 'share-1'});
     assert.equal(result.boxes[0].name, 'Ready');
     assert.deepEqual(plain(f.audio), before);
+});
+
+test('fixtures preserve permissions and fields for 10, 100, and 1,000 Library items', async () => {
+    for (const libraryCount of [10, 100, 1000]) {
+        const f = fixture({libraryCount});
+        const snapshot = await f.bridge.command('snapshot');
+        assert.equal(snapshot.library.length, libraryCount);
+        const first = snapshot.library[0];
+        assert.equal(first.id, 'library-0');
+        assert.equal(first.projectID, 'project-0');
+        assert.equal(first.playerID, 'player-0');
+        assert.equal(first.shareID, 'share-0');
+        assert.equal(first.artist, 'Artist 0');
+        assert.equal(first.artwork, 'https://example.test/artwork-0.png');
+        assert.equal(first.isOwned, true);
+        assert.equal(typeof first.canUpload, 'boolean');
+        assert.equal(typeof f.library.canUploadFilesInProject, 'function');
+        assert.ok(JSON.stringify(snapshot).length > libraryCount * 40);
+    }
+});
+
+test('fixtures preserve folder, version, processing, and empty-box semantics for 0, 100, and 1,000 boxes', async () => {
+    for (const boxCount of [0, 100, 1000]) {
+        const f = fixture({boxCount});
+        const snapshot = await f.bridge.command('snapshot');
+        assert.equal(snapshot.boxes.length, boxCount);
+        assert.equal(snapshot.boxesReady, true);
+        if (boxCount === 0) continue;
+        const kinds = new Set(snapshot.boxes.map(box => box.kind));
+        assert.ok(kinds.has('folder'));
+        assert.ok(kinds.has('stack'));
+        assert.ok(kinds.has('file'));
+        assert.ok(snapshot.boxes.some(box => box.isProcessing));
+        const stack = snapshot.boxes.find(box => box.kind === 'stack');
+        assert.match(stack.versionName, /^Version /);
+        assert.ok(Array.isArray(stack.childIDs));
+        assert.ok(snapshot.boxes.some(box => typeof box.duration === 'number'));
+        assert.ok(JSON.stringify(snapshot).length > boxCount * 40);
+    }
 });

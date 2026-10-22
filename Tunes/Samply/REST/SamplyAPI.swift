@@ -7,11 +7,16 @@ final class SamplyAPI {
     private let tokens: any TokenStore
     private let session: URLSession
     private let baseURL: URL
+    private let diagnostics: SamplyDiagnostics
+    private let clock: any MonotonicClock
 
     init(tokens: (any TokenStore)? = nil, session: URLSession? = nil,
-         baseURL: URL = URL(string: "https://samply.app/api/v0")!) {
+         baseURL: URL = URL(string: "https://samply.app/api/v0")!,
+         diagnostics: SamplyDiagnostics? = nil) {
         self.tokens = tokens ?? MemoryTokenStore()
         self.baseURL = baseURL
+        self.diagnostics = diagnostics ?? .shared
+        clock = SystemMonotonicClock()
         if let session { self.session = session }
         else {
             let config = URLSessionConfiguration.ephemeral
@@ -98,6 +103,16 @@ final class SamplyAPI {
     private func request<T: Decodable>(_ path: [String], method: String = "GET",
                                         body: Data? = nil, token: String? = nil,
                                         timeout: TimeInterval = 30) async throws -> T {
+        let operationID = diagnostics.nextOperationID()
+        let startedAt = clock.now()
+        var attemptCount = 0
+        var outcome: SamplyDiagnosticOutcome = .failure
+        defer {
+            diagnostics.record(SamplyDiagnosticSample(
+                stage: .restAttempt, command: .rest, operationID: operationID,
+                duration: clock.now() - startedAt, attemptCount: attemptCount,
+                outcome: outcome))
+        }
         let url = try Self.resourceURL(base: baseURL, components: path)
         guard url.scheme == "https", url.host == "samply.app", url.port == nil else {
             throw SamplyError.insecureURL
@@ -111,6 +126,7 @@ final class SamplyAPI {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         for attempt in 0...2 {
+            attemptCount = attempt + 1
             try Task.checkCancellation()
             let (data, response) = try await session.data(for: request)
             guard let response = response as? HTTPURLResponse else { throw SamplyError.invalidResponse }
@@ -119,12 +135,18 @@ final class SamplyAPI {
                 try await Task.sleep(for: .seconds(min(max(retry ?? pow(2, Double(attempt)), 0.5), 15)))
                 continue
             }
-            if response.statusCode == 401 { throw SamplyError.invalidToken }
+            if response.statusCode == 401 {
+                outcome = .accessDenied
+                throw SamplyError.invalidToken
+            }
             guard (200..<300).contains(response.statusCode) else {
                 throw SamplyError.http(response.statusCode, retryAfter: retry)
             }
-            do { return try JSONDecoder().decode(T.self, from: data) }
-            catch { throw SamplyError.invalidResponse }
+            do {
+                let decoded = try JSONDecoder().decode(T.self, from: data)
+                outcome = .success
+                return decoded
+            } catch { throw SamplyError.invalidResponse }
         }
         throw SamplyError.invalidResponse
     }
