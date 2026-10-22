@@ -65,7 +65,7 @@ Handle Samply sessions only. Do not integrate native Apple authorization or read
 
 ## REST, project creation, and uploads
 
-The official base URL is `https://samply.app/api/v0`. API sessions do not store cookies or caches and reject redirects to prevent forwarding bearer credentials. GET retries 429/502/503/504 responses within a bounded limit; POST requests for project creation and upload tickets are not automatically replayed.
+The official base URL is `https://samply.app/api/v0`. API sessions do not store cookies or caches and reject redirects to prevent forwarding bearer credentials. GET requests retry at most three total attempts for 429/502/503/504 and a narrow transient transport list; the caller's timeout is one operation-wide monotonic budget, so attempts and waits cannot each spend the original timeout. `Retry-After` accepts delay-seconds or an HTTP-date and is never shortened; a requested wait beyond the remaining budget returns the typed retryable HTTP error with that delay. POST requests for project creation, upload tickets, and artwork tickets are never automatically replayed.
 
 Project creation sends `POST /projects` with a JSON body containing only `name`. The documented response is a project object plus `playerUrl`. As a documented server-side side effect, Samply also creates a project-scoped player using the account's default player options and includes all files currently in the project. Tunes does not send upload, sharing, download, version, collaborator, or upload-portal settings and does not make a separate player-creation request.
 

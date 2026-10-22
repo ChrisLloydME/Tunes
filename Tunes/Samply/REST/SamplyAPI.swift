@@ -8,15 +8,17 @@ final class SamplyAPI {
     private let session: URLSession
     private let baseURL: URL
     private let diagnostics: SamplyDiagnostics
-    private let clock: any MonotonicClock
+    private let retryPolicy: SamplyRESTRetryPolicy
+    private var clock: any MonotonicClock { retryPolicy.monotonicClock }
 
     init(tokens: (any TokenStore)? = nil, session: URLSession? = nil,
          baseURL: URL = URL(string: "https://samply.app/api/v0")!,
-         diagnostics: SamplyDiagnostics? = nil) {
+         diagnostics: SamplyDiagnostics? = nil,
+         retryPolicy: SamplyRESTRetryPolicy? = nil) {
         self.tokens = tokens ?? MemoryTokenStore()
         self.baseURL = baseURL
         self.diagnostics = diagnostics ?? .shared
-        clock = SystemMonotonicClock()
+        self.retryPolicy = retryPolicy ?? SamplyRESTRetryPolicy()
         if let session { self.session = session }
         else {
             let config = URLSessionConfiguration.ephemeral
@@ -121,35 +123,66 @@ final class SamplyAPI {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = max(0.1, timeout)
         request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        for attempt in 0...2 {
-            attemptCount = attempt + 1
+
+        let isGET = method == "GET"
+        let deadline = clock.now() + max(0.1, timeout)
+        var attempt = 0
+        while true {
             try Task.checkCancellation()
-            let (data, response) = try await session.data(for: request)
-            guard let response = response as? HTTPURLResponse else { throw SamplyError.invalidResponse }
-            let retry = response.value(forHTTPHeaderField: "Retry-After").flatMap(Double.init)
-            if method == "GET", attempt < 2, [429, 502, 503, 504].contains(response.statusCode) {
-                try await Task.sleep(for: .seconds(min(max(retry ?? pow(2, Double(attempt)), 0.5), 15)))
-                continue
-            }
-            if response.statusCode == 401 {
-                outcome = .accessDenied
-                throw SamplyError.invalidToken
-            }
-            guard (200..<300).contains(response.statusCode) else {
-                throw SamplyError.http(response.statusCode, retryAfter: retry)
-            }
+            let remaining = deadline - clock.now()
+            guard remaining > 0 else { throw SamplyError.timedOut }
+            // Each attempt gets only the remaining operation budget.
+            request.timeoutInterval = max(0.1, remaining)
+            attemptCount = attempt + 1
             do {
-                let decoded = try JSONDecoder().decode(T.self, from: data)
-                outcome = .success
-                return decoded
-            } catch { throw SamplyError.invalidResponse }
+                let (data, response) = try await session.data(for: request)
+                guard let response = response as? HTTPURLResponse else {
+                    throw SamplyError.invalidResponse
+                }
+                if isGET, retryPolicy.isRetryable(status: response.statusCode), attempt < 2 {
+                    let delay = retryPolicy.retryDelay(for: response, attempt: attempt)
+                    let remainingAfterRead = deadline - clock.now()
+                    guard delay < remainingAfterRead else {
+                        // Do not retry past the caller's budget or shorten a
+                        // server-requested wait. Report the typed retryable error.
+                        throw SamplyError.http(response.statusCode, retryAfter: delay)
+                    }
+                    try await retryPolicy.sleep(for: delay)
+                    attempt += 1
+                    continue
+                }
+                if response.statusCode == 401 {
+                    outcome = .accessDenied
+                    throw SamplyError.invalidToken
+                }
+                guard (200..<300).contains(response.statusCode) else {
+                    throw SamplyError.http(response.statusCode,
+                                           retryAfter: retryPolicy.serverDelay(for: response))
+                }
+                do {
+                    let decoded = try JSONDecoder().decode(T.self, from: data)
+                    outcome = .success
+                    return decoded
+                } catch {
+                    throw SamplyError.invalidResponse
+                }
+            } catch let failure as URLError where isGET
+                && retryPolicy.shouldRetryTransport(failure) && attempt < 2 {
+                let delay = retryPolicy.fallbackDelay(attempt: attempt)
+                let remainingAfterFailure = deadline - clock.now()
+                guard delay < remainingAfterFailure else { throw failure }
+                try await retryPolicy.sleep(for: delay)
+                attempt += 1
+            } catch let failure as URLError {
+                outcome = failure.code == .cancelled ? .cancelled : .failure
+                throw failure
+            }
         }
-        throw SamplyError.invalidResponse
     }
+
 }
 
 /// Do not forward bearer credentials or signed PUTs through unexpected redirects.
