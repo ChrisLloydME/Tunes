@@ -8,6 +8,9 @@ struct LibraryView: View {
     let creationNotice: ProjectCreationNotice?
     let retryProjectUploads: () -> Void
     let retryProjectArtwork: () -> Void
+    let refreshProjectLibrary: () -> Void
+    let openCreatedProject: () -> Void
+    let startNewProject: () -> Void
     let dismissCreationNotice: () -> Void
     let openProject: (LibraryItem) -> Void
     @State private var query = ""
@@ -26,6 +29,9 @@ struct LibraryView: View {
                     notice: creationNotice,
                     retryUploads: retryProjectUploads,
                     retryArtwork: retryProjectArtwork,
+                    refreshLibrary: refreshProjectLibrary,
+                    openProject: openCreatedProject,
+                    startNewProject: startNewProject,
                     dismiss: dismissCreationNotice
                 )
                 .padding(.horizontal, 24)
@@ -81,6 +87,9 @@ private struct ProjectCreationNoticeView: View {
     let notice: ProjectCreationNotice
     let retryUploads: () -> Void
     let retryArtwork: () -> Void
+    let refreshLibrary: () -> Void
+    let openProject: () -> Void
+    let startNewProject: () -> Void
     let dismiss: () -> Void
 
     var body: some View {
@@ -97,6 +106,14 @@ private struct ProjectCreationNoticeView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
+                    if notice.canRefreshLibrary {
+                        Button("Refresh Library", action: refreshLibrary)
+                            .buttonStyle(.bordered)
+                    }
+                    if notice.canOpenProject {
+                        Button("Open Project", action: openProject)
+                            .buttonStyle(.bordered)
+                    }
                     if notice.canRetryUploads {
                         Button("Retry Uploads", action: retryUploads)
                             .buttonStyle(.bordered)
@@ -105,6 +122,10 @@ private struct ProjectCreationNoticeView: View {
                         Button("Retry Artwork", action: retryArtwork)
                             .buttonStyle(.bordered)
                     }
+                }
+                if notice.canStartNewProject {
+                    Button("Start New Project", action: startNewProject)
+                        .buttonStyle(.bordered)
                 }
             }
             Spacer(minLength: 12)

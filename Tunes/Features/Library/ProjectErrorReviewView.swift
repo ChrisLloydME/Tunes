@@ -36,6 +36,9 @@ struct ProjectErrorReviewView: View {
                     creationNotice: noticeDismissed ? nil : SamplyBackend.creationNotice(for: creation),
                     retryProjectUploads: { creation.retryFailedInitialFiles() },
                     retryProjectArtwork: { creation.retryArtwork() },
+                    refreshProjectLibrary: { Task { await creation.refreshLibrary() } },
+                    openCreatedProject: { Task { await creation.openCreatedProject() } },
+                    startNewProject: { creation.discardConfirmedCreation() },
                     dismissCreationNotice: { noticeDismissed = true },
                     openProject: { _ in showsSheet = true }
                 )
@@ -56,7 +59,9 @@ struct ProjectErrorReviewView: View {
         creation?.invalidate()
         noticeDismissed = false
         let fixture = ProjectErrorFixture(scenario: scenario)
-        let coordinator = ProjectCreationCoordinator(api: fixture, web: fixture, fileUploader: fixture)
+        let coordinator = ProjectCreationCoordinator(api: fixture, web: fixture,
+                                                     uploader: fixture,
+                                                     credentials: fixture.credentials)
         creation = coordinator
         Task {
             await coordinator.create(
@@ -75,8 +80,8 @@ private enum ProjectErrorScenario: String, CaseIterable, Identifiable {
     case uncertainUpload = "Upload: Not Confirmed"
     case cancelledUpload = "Upload: Cancelled"
     case artworkFailed = "Artwork: Failed"
-    case artworkUncertain = "Artwork: Not Confirmed"
-    case artworkUnsupported = "Artwork: Unsupported"
+    case artworkUncertain = "Artwork: Submitted, Unconfirmed"
+    case artworkSubmitted = "Artwork: Submitted, Pending"
     case combined = "Uploads and Artwork: Failed"
     case creationFailed = "Creation: Failed"
     case creationUncertain = "Creation: Not Confirmed"
@@ -85,7 +90,7 @@ private enum ProjectErrorScenario: String, CaseIterable, Identifiable {
 
     var includesArtwork: Bool {
         switch self {
-        case .artworkFailed, .artworkUncertain, .artworkUnsupported, .combined: true
+        case .artworkFailed, .artworkUncertain, .artworkSubmitted, .combined: true
         default: false
         }
     }
@@ -102,58 +107,98 @@ private enum ProjectErrorScenario: String, CaseIterable, Identifiable {
 }
 
 @MainActor
-private final class ProjectErrorFixture: ProjectCreatingAPI, ProjectCreationWebSession, ProjectFileUploading {
+private final class ProjectErrorFixture: ProjectCreatingAPI, ProjectCreationWebSession,
+    ProjectAssetUploading {
     static let item = LibraryItem(id: "debug-project", name: "Error UI Review Project",
                                   projectID: "debug-project", canUpload: true, isOwned: true)
     let scenario: ProjectErrorScenario
     let accountID: String? = "debug-account"
     let isSigningOut = false
+    let credentials = ProjectErrorCredentials()
 
     init(scenario: ProjectErrorScenario) { self.scenario = scenario }
 
-    func createProject(name: String) async throws -> SamplyProject {
+    func createProject(name: String,
+                       credential: VerifiedProjectCredential) async throws -> SamplyProject {
         try await Task.sleep(for: .milliseconds(350))
         switch scenario {
         case .creationFailed: throw SamplyError.http(403, retryAfter: nil)
         case .creationUncertain: throw URLError(.timedOut)
-        default: return SamplyProject(id: Self.item.id, name: name)
+        default:
+            return SamplyProject(id: Self.item.id, name: name,
+                                 creator: .init(uid: "debug-account"))
         }
     }
 
     func performUpload(file: URL, projectID: String, parentID: String?,
-                       progress: @escaping @MainActor @Sendable (Double) -> Void) async throws -> String {
+                       authorization: UploadAuthorization,
+                       progress: @escaping @MainActor @Sendable (Double) -> Void) async -> UploadOutcome {
         progress(0.35)
-        try await Task.sleep(for: .milliseconds(350))
+        try? await Task.sleep(for: .milliseconds(350))
+        let identity = UploadTicketIdentity(boxID: "debug-box", projectID: projectID,
+                                            fileName: file.lastPathComponent,
+                                            kind: .originalFile)
         switch file.lastPathComponent {
-        case "Uploaded Mix.wav": return "debug-box"
-        case "Unconfirmed Mix.wav": throw URLError(.timedOut)
-        case "Cancelled Mix.wav": throw CancellationError()
-        default: throw SamplyError.http(403, retryAfter: nil)
+        case "Uploaded Mix.wav": return .submitted(identity)
+        case "Unconfirmed Mix.wav": return .uncertain(
+            "Samply did not confirm whether the upload ticket was created.",
+            phase: .ticketRequested)
+        case "Cancelled Mix.wav": return .cancelled(.waiting)
+        default: return .failed("Samply rejected the upload request (HTTP 403).",
+                                phase: .waiting)
+        }
+    }
+
+    func performArtworkUpload(payload: ProjectArtworkPayload, projectID: String,
+                              authorization: UploadAuthorization) async -> UploadOutcome {
+        try? await Task.sleep(for: .milliseconds(350))
+        let identity = UploadTicketIdentity(boxID: "debug-artwork-box", projectID: projectID,
+                                            fileName: payload.fileName, kind: .artwork)
+        switch scenario {
+        case .artworkFailed:
+            return .failed("Samply rejected the artwork request (HTTP 403).", phase: .waiting)
+        case .artworkUncertain:
+            return .uncertain("The artwork upload timed out after submission started.",
+                              phase: .putStarted, ticket: identity)
+        case .artworkSubmitted:
+            return .submitted(identity)
+        default:
+            return .failed("Samply rejected the artwork request (HTTP 403).", phase: .waiting)
         }
     }
 
     func call<T: Decodable>(_ command: String, arguments: [String: Any]) async throws -> T {
         try await Task.sleep(for: .milliseconds(350))
-        let data: Data
-        switch command {
-        case "setProjectArtwork":
-            let status: String
-            switch scenario {
-            case .artworkUncertain: status = "submitted"
-            case .artworkUnsupported: status = "unsupported"
-            default: status = "failed"
-            }
-            data = try JSONSerialization.data(withJSONObject: ["status": status])
-        case "refreshPage", "browse":
-            let snapshot = WebSnapshot(
-                version: 1, account: .init(uid: "debug-account", name: "UI Review"),
-                libraryReady: true, library: [Self.item], boxesReady: true, boxes: [], capabilities: []
-            )
-            data = try JSONEncoder().encode(snapshot)
-        default:
+        guard command == "refreshPage" || command == "browse" else {
             throw SamplyError.webContract("Unsupported debug fixture command: \(command)")
         }
+        let snapshot = WebSnapshot(
+            version: 1, account: .init(uid: "debug-account", name: "UI Review"),
+            libraryReady: true, library: [Self.item], boxesReady: true, boxes: [], capabilities: []
+        )
+        let data = try JSONEncoder().encode(snapshot)
         return try JSONDecoder().decode(T.self, from: data)
+    }
+}
+
+@MainActor
+private final class ProjectErrorCredentials: ProjectCredentialProviding {
+    var state: ProjectCredentialState {
+        .verified(accountID: "debug-account", sessionGeneration: 0, credentialRevision: 0)
+    }
+    var accountID: String? { "debug-account" }
+    var sessionGeneration: UInt64 { 0 }
+    var credentialRevision: UInt64 { 0 }
+    var hasStoredToken: Bool { true }
+
+    func verifiedCredential() -> VerifiedProjectCredential? {
+        VerifiedProjectCredential(token: "debug-fixture-token", accountID: "debug-account",
+                                  sessionGeneration: 0, credentialRevision: 0)
+    }
+
+    func isCurrent(_ context: MutationContext) -> Bool {
+        context.accountID == "debug-account" && context.sessionGeneration == 0 &&
+            context.credentialRevision == 0
     }
 }
 #endif

@@ -25,7 +25,7 @@ struct ConnectionView: View {
 
             settingsPage(
                 title: "API Access",
-                detail: "Connect a personal access token to create projects. Artwork uses your Samply web session; original files use the token."
+                detail: "Connect a personal access token to create projects and upload artwork or original files. Tunes verifies that the token belongs to the signed-in Samply account before enabling writes."
             ) {
                 tokenSection
                 ConnectionSettingsSection(title: "Token Storage") {
@@ -137,9 +137,7 @@ struct ConnectionView: View {
         ConnectionSettingsSection(title: "Personal Access Token") {
             ConnectionSettingsRow(
                 title: backend.hasToken ? "Token Added" : "Optional API Access",
-                detail: backend.hasToken
-                    ? "A verified token is saved on this Mac."
-                    : "Sign in, then add a token from the same Samply account.",
+                detail: credentialDetail,
                 systemImage: "key"
             ) {
                 Button("Create Token") { backend.web.openTokenPreferences() }
@@ -179,6 +177,21 @@ struct ConnectionView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var credentialDetail: String {
+        switch backend.credentialState {
+        case .absent:
+            return "Sign in, then add a token from the same Samply account."
+        case .validating:
+            return "Verifying this token against the signed-in account…"
+        case .verified:
+            return "A verified token is saved on this Mac."
+        case .rejected(let message):
+            return message
+        case .identityUnverifiable(let message):
+            return message
         }
     }
 

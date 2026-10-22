@@ -186,7 +186,7 @@ struct ContentView: View {
             .defaultScrollAnchor(.center)
         } else if showsProject, let item = backend.selectedItem {
             AlbumDetailView(backend: backend, item: item) {
-                if backend.hasToken { backend.chooseUpload() } else { showConnection = true }
+                if backend.isCredentialVerified { backend.chooseUpload() } else { showConnection = true }
             }
         } else if !backend.libraryReady {
             ProgressView("Loading your Samply library…")
@@ -197,6 +197,9 @@ struct ContentView: View {
                 creationNotice: backend.projectCreationNotice,
                 retryProjectUploads: backend.retryProjectUploads,
                 retryProjectArtwork: backend.retryProjectArtwork,
+                refreshProjectLibrary: { Task { await backend.refreshCreatedProject() } },
+                openCreatedProject: { Task { await backend.openCreatedProject() } },
+                startNewProject: backend.abandonCreatedProject,
                 dismissCreationNotice: backend.dismissProjectCreationNotice,
                 openProject: { item in
                     backend.select(item)
@@ -222,6 +225,8 @@ struct ContentView: View {
                 .font(.caption).frame(maxWidth: .infinity, alignment: .leading).padding()
         case .cancelled:
             Text("Upload cancelled").font(.caption).padding()
+        case .uncertain(let message):
+            Text(message).font(.caption).textSelection(.enabled).padding()
         case .failed(let error):
             Text("Upload failed: \(error)").font(.caption).textSelection(.enabled).padding()
         }

@@ -41,7 +41,21 @@ struct NewProjectSheet: View {
     }
 
     private var isConnected: Bool { isReviewing || backend.isConnected }
-    private var hasToken: Bool { isReviewing || backend.hasToken }
+    private var credentialState: ProjectCredentialState {
+        #if DEBUG
+        if isReviewing {
+            return .verified(accountID: accountID ?? "review-account", sessionGeneration: 0,
+                             credentialRevision: 0)
+        }
+        #endif
+        return backend.credentialState
+    }
+    private var hasVerifiedCredential: Bool {
+        #if DEBUG
+        if isReviewing { return true }
+        #endif
+        return backend.isCredentialVerified
+    }
     private var creation: ProjectCreationCoordinator {
         #if DEBUG
         if let reviewCreation { return reviewCreation }
@@ -51,7 +65,6 @@ struct NewProjectSheet: View {
     private var trimmedName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var isPreparingArtwork: Bool { isTransferringPhoto || artworkStore.isLoading }
     private var showsFilesPage: Bool { page == .files && creation.createdProject != nil }
-    private var blocksFilesPageDismissal: Bool { creation.isUploadingInitialFiles }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -65,9 +78,9 @@ struct NewProjectSheet: View {
                 .padding(.vertical, 14)
         }
         .frame(width: sheetWidth, height: sheetHeight, alignment: .topLeading)
-        .interactiveDismissDisabled(showsFilesPage ? blocksFilesPageDismissal : creation.blocksDismissal)
+        .interactiveDismissDisabled(creation.blocksDismissal)
         .onAppear {
-            if creation.canFinishCreatedProject { creation.reset() }
+            creation.prepareForPresentation()
             let currentAccount = backend.web.snapshot?.account?.uid
             accountID = currentAccount
             artworkStore.updateAccount(currentAccount)
@@ -78,8 +91,8 @@ struct NewProjectSheet: View {
                 nameFieldFocused = true
             }
         }
-        .onChange(of: backend.hasToken) { _, hasToken in
-            if hasToken, case .idle = creation.state { nameFieldFocused = true }
+        .onChange(of: backend.isCredentialVerified) { _, verified in
+            if verified, case .idle = creation.state { nameFieldFocused = true }
         }
         .onChange(of: backend.web.snapshot?.account?.uid) { _, newAccount in
             guard newAccount != accountID else { return }
@@ -101,11 +114,7 @@ struct NewProjectSheet: View {
             artworkStore.remove()
             cancelPhotoLoad()
             filesToUpload = []
-            if creation.canFinishCreatedProject {
-                creation.reset()
-            } else if case .failed = creation.state {
-                creation.reset()
-            }
+            creation.sheetDidDisappear()
         }
     }
 
@@ -150,20 +159,29 @@ struct NewProjectSheet: View {
             VStack(alignment: .leading, spacing: 18) {
                 if !isConnected {
                     signedOutGuidance
-                } else if hasToken {
-                    switch creation.state {
-                    case .idle, .failed:
-                        detailsForm
-                    case .creating:
-                        creatingPanel
-                    case .uncertain(let message, let canStartOver):
-                        uncertainPanel(message, canStartOver)
-                    case .created:
-                        ProgressView("Preparing project…")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
                 } else {
-                    tokenGuidance
+                    switch credentialState {
+                    case .absent:
+                        tokenGuidance
+                    case .validating:
+                        verifyingCredentialPanel
+                    case .rejected(let message):
+                        credentialProblem(message, title: "Token Rejected")
+                    case .identityUnverifiable(let message):
+                        credentialProblem(message, title: "Token Ownership Not Verified")
+                    case .verified:
+                        switch creation.state {
+                        case .idle, .failed:
+                            detailsForm
+                        case .creating:
+                            creatingPanel
+                        case .uncertain(let message, let canStartOver):
+                            uncertainPanel(message, canStartOver)
+                        case .created:
+                            ProgressView("Preparing project…")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -351,6 +369,7 @@ struct NewProjectSheet: View {
 
     private var filesPage: some View {
         VStack(alignment: .leading, spacing: 14) {
+            createdRecoveryPanel
             HStack {
                 Text("Files")
                     .font(.headline)
@@ -367,6 +386,8 @@ struct NewProjectSheet: View {
 
             fileListCard
 
+            artworkStatus
+
             if creation.canRetryInitialFiles {
                 HStack {
                     Spacer()
@@ -377,7 +398,7 @@ struct NewProjectSheet: View {
                 }
             }
 
-            if !creation.canFinishCreatedProject, !creation.isUploadingInitialFiles {
+            if creation.canAbandonConfirmedCreation {
                 HStack(alignment: .firstTextBaseline) {
                     Text("This project remains in Samply.")
                         .font(.caption)
@@ -480,6 +501,119 @@ struct NewProjectSheet: View {
 
     // MARK: - Guidance
 
+    @ViewBuilder private var artworkStatus: some View {
+        switch creation.artworkState {
+        case .none:
+            EmptyView()
+        case .pending:
+            statusMessage("Uploading artwork…", systemImage: "arrow.up.circle")
+        case .submitted:
+            statusMessage("Artwork submitted; confirmation pending. Tunes cannot prove that this upload became the project artwork.",
+                          systemImage: "clock")
+        case .confirmedAssigned:
+            statusMessage("Artwork assignment confirmed.", systemImage: "checkmark.circle")
+        case .unresolved(_, let message):
+            statusMessage(message, systemImage: "questionmark.circle")
+        case .failed(let message, let retryable):
+            HStack(alignment: .firstTextBaseline) {
+                statusMessage(message, systemImage: "exclamationmark.triangle")
+                Spacer()
+                if retryable, creation.canRetryArtwork {
+                    Button("Retry Artwork") { creation.retryArtwork() }
+                        .buttonStyle(.bordered)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var createdRecoveryPanel: some View {
+        if let stage = creation.createdStage {
+            switch stage {
+            case .refreshing:
+                statusMessage("Project created. Refreshing the complete Library…",
+                              systemImage: "arrow.clockwise")
+            case .delayed:
+                HStack(alignment: .firstTextBaseline) {
+                    statusMessage("Project created, waiting for the Library to include it.",
+                                  systemImage: "clock")
+                    Spacer()
+                    Button("Refresh Library") {
+                        Task { await creation.refreshLibrary() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(creation.isBackgroundWorkRunning)
+                }
+            case .refreshFailed(let message):
+                HStack(alignment: .firstTextBaseline) {
+                    statusMessage(message, systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    Button("Refresh Library") {
+                        Task { await creation.refreshLibrary() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            case .quarantined(let message):
+                HStack(alignment: .firstTextBaseline) {
+                    statusMessage(message, systemImage: "exclamationmark.octagon")
+                    Spacer()
+                    Button("Refresh Library") {
+                        Task { await creation.refreshLibrary() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            case .opening:
+                statusMessage("Opening the confirmed project…", systemImage: "arrow.up.forward.app")
+            case .opened:
+                HStack(alignment: .firstTextBaseline) {
+                    statusMessage("Project created and present in the Library.",
+                                  systemImage: "checkmark.circle")
+                    Spacer()
+                    Button("Open Project") {
+                        Task { await creation.openCreatedProject() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            case .openFailed(let message):
+                HStack(alignment: .firstTextBaseline) {
+                    statusMessage(message, systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    Button("Open Again") {
+                        Task { await creation.openCreatedProject() }
+                    }
+                    .buttonStyle(.bordered)
+                }
+            case .visible:
+                EmptyView()
+            }
+        }
+    }
+
+    private var verifyingCredentialPanel: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Verifying Personal Access Token", systemImage: "key")
+                .font(.headline)
+            ProgressView("Checking the token against the signed-in Samply account…")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("Tunes does not create a project while token identity is unverified.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func credentialProblem(_ message: String, title: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: "key.slash")
+                .font(.headline)
+            Text(message)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+            SettingsLink {
+                Text("Open API Access Settings")
+            }
+        }
+    }
+
     private var signedOutGuidance: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label("Sign In to Samply", systemImage: "person.crop.circle")
@@ -517,11 +651,11 @@ struct NewProjectSheet: View {
     @ViewBuilder private var footerLeadingButton: some View {
         if showsFilesPage {
             Button("Close") { returnToLibrary() }
-                .disabled(blocksFilesPageDismissal)
+                .disabled(creation.blocksDismissal)
         } else {
             switch creation.state {
             case .idle, .failed:
-                if isConnected, hasToken {
+                if isConnected, hasVerifiedCredential {
                     Button("Cancel") { closeDetails() }
                         .keyboardShortcut(.cancelAction)
                         .accessibilityIdentifier("cancelNewProject")
@@ -548,19 +682,22 @@ struct NewProjectSheet: View {
             if creation.isUploadingInitialFiles {
                 Button("Cancel Uploads") { creation.cancelInitialUploads() }
                     .buttonStyle(.borderedProminent)
+            } else if creation.isQuarantined {
+                Button("Close") { returnToLibrary() }
+                    .keyboardShortcut(.defaultAction)
             } else if filesToUpload.isEmpty {
                 Button("Done") { returnToLibrary() }
                     .keyboardShortcut(.defaultAction)
-                    .disabled(blocksFilesPageDismissal)
             } else {
                 Button("Upload") { uploadSelectedFiles() }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(.borderedProminent)
+                    .disabled(!hasVerifiedCredential)
             }
         } else {
             switch creation.state {
             case .idle, .failed:
-                if isConnected, hasToken {
+                if isConnected, hasVerifiedCredential {
                     Button("Create") { submit() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(trimmedName.isEmpty || creation.isCreating || isPreparingArtwork)
@@ -595,22 +732,29 @@ struct NewProjectSheet: View {
 
     private func initialFileStatus(_ file: ProjectCreationCoordinator.InitialFile) -> String {
         switch file.status {
-        case .pending: return "Waiting to upload."
+        case .waiting: return "Waiting to upload."
         case .uploading: return "Uploading \(Int(file.progress * 100))%…"
         case .uploaded: return "Submitted; Samply is processing."
-        case .failed(let message): return "Not uploaded: \(message)"
-        case .cancelled: return "Upload cancelled."
-        case .uncertain(let message): return message
+        case .failed(let message, let retryable):
+            return retryable ? "Not uploaded: \(message)" : "Not uploaded; check the project before retrying. \(message)"
+        case .cancelled(let retryable, let boxID):
+            if let boxID {
+                return "Upload cancelled after ticket \(boxID) was created. The resource may exist."
+            }
+            return retryable ? "Upload cancelled before submission." :
+                "Upload cancelled after submission started; check the project."
+        case .uncertain(let message, _):
+            return message
         }
     }
 
     private func initialFileSymbol(_ status: ProjectCreationCoordinator.InitialFile.Status) -> String {
         switch status {
-        case .pending: return "clock"
+        case .waiting: return "clock"
         case .uploading: return "arrow.up.circle"
         case .uploaded: return "checkmark.circle"
-        case .failed: return "exclamationmark.triangle"
-        case .cancelled: return "slash.circle"
+        case .failed(_, let retryable): return retryable ? "exclamationmark.triangle" : "questionmark.circle"
+        case .cancelled(let retryable, _): return retryable ? "slash.circle" : "questionmark.circle"
         case .uncertain: return "questionmark.circle"
         }
     }
@@ -675,6 +819,7 @@ struct NewProjectSheet: View {
 
     private func startNewProject() {
         creation.discardConfirmedCreation()
+        guard creation.createdProject == nil else { return }
         filesToUpload = []
         name = ""
         validationMessage = nil
@@ -729,7 +874,7 @@ struct NewProjectSheet: View {
     }
 
     private func submit() {
-        guard isConnected, hasToken, !creation.isCreating,
+        guard isConnected, hasVerifiedCredential, !creation.isCreating,
               !isPreparingArtwork else { return }
         guard !trimmedName.isEmpty else {
             validationMessage = "Enter a project name."
@@ -750,13 +895,15 @@ struct NewProjectSheet: View {
     }
 
     private func closeDetails() {
-        if creation.canFinishCreatedProject {
+        switch creation.state {
+        case .idle, .failed:
             creation.reset()
-        } else {
-            switch creation.state {
-            case .idle, .failed: creation.reset()
-            default: break
-            }
+        case .created:
+            // Closing never discards a confirmed project. The coordinator keeps
+            // refresh/delay/failure recovery in backend-owned state.
+            break
+        default:
+            break
         }
         dismiss()
     }

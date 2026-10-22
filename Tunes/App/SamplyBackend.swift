@@ -7,6 +7,9 @@ struct ProjectCreationNotice: Identifiable, Equatable {
     let message: String
     let canRetryUploads: Bool
     let canRetryArtwork: Bool
+    let canRefreshLibrary: Bool
+    let canOpenProject: Bool
+    let canStartNewProject: Bool
 }
 
 /// Composition root for the current web-session and REST integration.
@@ -17,6 +20,7 @@ final class SamplyBackend {
     let api: SamplyAPI
     let playback: PlaybackController
     let uploader: SamplyUploader
+    let credentials: ProjectCredentialAuthority
     let projectCreation: ProjectCreationCoordinator
     private(set) var library: [LibraryItem] = []
     private(set) var boxes: [WebBox] = []
@@ -27,7 +31,6 @@ final class SamplyBackend {
     private(set) var isPlayingSelection = false
     private(set) var isRefreshing = false
     private(set) var isOpeningSamply = false
-    private(set) var hasToken = false
     private(set) var error: String?
     private(set) var hasTransientError = false
     private(set) var projectCreationNotice: ProjectCreationNotice?
@@ -36,6 +39,7 @@ final class SamplyBackend {
     @ObservationIgnored private var browseTask: Task<Void, Never>?
     @ObservationIgnored private var playTask: Task<Void, Never>?
     @ObservationIgnored private var selectionGeneration = 0
+    @ObservationIgnored private var sessionGeneration: UInt64 = 0
     @ObservationIgnored private var accountID: String?
     @ObservationIgnored private var hasResolvedTokenAccount = false
 
@@ -48,9 +52,10 @@ final class SamplyBackend {
         self.api = api
         playback = PlaybackController(web: web)
         uploader = SamplyUploader(api: api)
-        projectCreation = ProjectCreationCoordinator(api: api, web: web, fileUploader: uploader)
-        do { hasToken = try tokens.read() != nil }
-        catch { recordFailure(error) }
+        let credentials = ProjectCredentialAuthority(tokens: tokens, api: api, ownership: web)
+        self.credentials = credentials
+        projectCreation = ProjectCreationCoordinator(api: api, web: web, uploader: uploader,
+                                                     credentials: credentials)
         projectCreation.onLibraryRefreshed = { [weak self] items in
             self?.library = items
         }
@@ -65,6 +70,9 @@ final class SamplyBackend {
     var isConnected: Bool { web.snapshot?.account != nil && !web.isSigningOut }
     var isCheckingSession: Bool { web.authenticationState == .checking }
     var libraryReady: Bool { web.snapshot?.libraryReady == true }
+    var hasToken: Bool { credentials.hasStoredToken }
+    var credentialState: ProjectCredentialState { credentials.state }
+    var isCredentialVerified: Bool { credentials.verifiedCredential() != nil }
 
     func start() {
         // Hosted unit tests must not load an existing real beta account or contact Samply.
@@ -87,17 +95,15 @@ final class SamplyBackend {
         guard let state = web.snapshot, state.authenticationState != .checking else { return }
         let newAccount = state.account?.uid
         if !hasResolvedTokenAccount || newAccount != accountID {
+            sessionGeneration &+= 1
             projectCreation.invalidate()
             invalidateSelection()
             library = []
             playback.clear()
             uploader.reset()
-            // Restore only after identity resolves; never reuse account A's PAT for B.
-            hasToken = false
-            do {
-                try tokens.restore(for: newAccount)
-                hasToken = try tokens.read() != nil
-            } catch { recordFailure(error) }
+            // Restore and revalidate only after identity resolves; never reuse
+            // account A's PAT for B, and never treat the stored account ID as proof.
+            credentials.activate(accountID: newAccount, generation: sessionGeneration)
             accountID = newAccount
             hasResolvedTokenAccount = true
         }
@@ -213,23 +219,16 @@ final class SamplyBackend {
 
     func saveToken(_ token: String) async throws {
         guard isConnected, accountID != nil else { throw SamplyError.noAccount }
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !trimmed.contains("\n"), !trimmed.contains("\r") else { throw SamplyError.invalidToken }
-        // Validate before replacing a working credential. Never retain a rejected token.
-        let account = accountID
-        let generation = selectionGeneration
-        _ = try await api.projects(token: trimmed)
-        guard account == accountID, generation == selectionGeneration, !web.isSigningOut else {
-            throw CancellationError()
-        }
-        try tokens.save(trimmed)
-        hasToken = true
+        try await credentials.saveCandidate(token)
+        // A replacement invalidates every in-flight operation's captured revision.
+        projectCreation.credentialChanged()
+        uploader.reset()
     }
 
     func removeToken() throws {
         uploader.reset()
-        hasToken = false
-        try tokens.remove()
+        projectCreation.credentialChanged()
+        try credentials.remove()
     }
 
     func retryProjectUploads() {
@@ -244,6 +243,21 @@ final class SamplyBackend {
         projectCreationNotice = nil
     }
 
+    func refreshCreatedProject() async {
+        await projectCreation.refreshLibrary()
+    }
+
+    func openCreatedProject() async {
+        await projectCreation.openCreatedProject()
+    }
+
+    func abandonCreatedProject() {
+        projectCreation.discardConfirmedCreation()
+        if projectCreation.createdProject == nil {
+            projectCreationNotice = nil
+        }
+    }
+
     private func refreshProjectCreationNotice() {
         projectCreationNotice = Self.creationNotice(for: projectCreation)
     }
@@ -256,13 +270,15 @@ final class SamplyBackend {
         var parts: [String] = []
         let failedFiles = projectCreation.initialFiles.filter {
             switch $0.status {
-            case .failed, .cancelled: return true
+            case .failed(_, true), .cancelled(true, _): return true
             default: return false
             }
         }.count
         let uncertainFiles = projectCreation.initialFiles.filter {
-            if case .uncertain = $0.status { return true }
-            return false
+            switch $0.status {
+            case .uncertain, .cancelled(false, _), .failed(_, false): return true
+            default: return false
+            }
         }.count
         if failedFiles > 0 {
             parts.append("\(failedFiles) file\(failedFiles == 1 ? "" : "s") from “\(name)” did not upload.")
@@ -271,12 +287,26 @@ final class SamplyBackend {
             parts.append("\(uncertainFiles) upload\(uncertainFiles == 1 ? "" : "s") for “\(name)” could not be confirmed and may already be in the project.")
         }
         switch projectCreation.artworkState {
-        case .failed:
-            parts.append("Artwork was not assigned to “\(name)”.")
-        case .uncertain:
-            parts.append("Artwork for “\(name)” could not be confirmed.")
-        case .unsupported:
-            parts.append("Artwork could not be assigned to “\(name)” by this Samply web build.")
+        case .failed(let message, _):
+            parts.append("Artwork for “\(name)” was not submitted. \(message)")
+        case .submitted:
+            parts.append("Artwork for “\(name)” was submitted; confirmation is pending.")
+        case .unresolved(_, let message):
+            parts.append("Artwork for “\(name)” is unresolved. \(message)")
+        default:
+            break
+        }
+        switch projectCreation.createdStage {
+        case .refreshing:
+            parts.append("“\(name)” was created. Refreshing the complete Library…")
+        case .delayed:
+            parts.append("“\(name)” was created but has not appeared in the Library yet.")
+        case .refreshFailed(let message):
+            parts.append(message)
+        case .quarantined(let message):
+            parts.append(message)
+        case .openFailed(let message):
+            parts.append(message)
         default:
             break
         }
@@ -286,11 +316,15 @@ final class SamplyBackend {
         return ProjectCreationNotice(
             message: parts.joined(separator: " "),
             canRetryUploads: projectCreation.canRetryInitialFiles,
-            canRetryArtwork: projectCreation.canRetryArtwork)
+            canRetryArtwork: projectCreation.canRetryArtwork,
+            canRefreshLibrary: projectCreation.canRefreshCreatedProject,
+            canOpenProject: projectCreation.canOpenCreatedProject,
+            canStartNewProject: projectCreation.canAbandonConfirmedCreation)
     }
 
     func chooseUpload() {
-        guard hasToken, let item = selectedItem, item.canUpload, let projectID = item.projectID else { return }
+        guard credentials.verifiedCredential() != nil,
+              let item = selectedItem, item.canUpload, let projectID = item.projectID else { return }
         let parentID = folderPath.last?.id
         let generation = selectionGeneration
         let panel = NSOpenPanel()
@@ -301,8 +335,11 @@ final class SamplyBackend {
         panel.begin { [weak self] response in
             guard response == .OK, let file = panel.url else { return }
             Task { @MainActor in
-                guard let self, self.selectedItem?.id == item.id, self.selectionGeneration == generation, self.hasToken else { return }
-                self.uploader.upload(file: file, projectID: projectID, parentID: parentID)
+                guard let self, self.selectedItem?.id == item.id,
+                      self.selectionGeneration == generation,
+                      let credential = self.credentials.verifiedCredential() else { return }
+                self.uploader.upload(file: file, projectID: projectID, parentID: parentID,
+                                     token: credential.token)
             }
         }
     }
@@ -364,7 +401,8 @@ final class SamplyBackend {
         library = []
         playback.clear()
         uploader.reset()
-        hasToken = false
+        sessionGeneration &+= 1
+        credentials.activate(accountID: nil, generation: sessionGeneration)
         do { try tokens.remove() }
         catch { recordFailure(error) }
         accountID = nil
