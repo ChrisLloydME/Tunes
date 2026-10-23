@@ -28,7 +28,7 @@ The planned browser sign-in flow uses official authorization: Tunes starts autho
 - `Tunes/Resources`: the versioned JavaScript adapter and bundled third-party license.
 - `TunesTests` and `Scripts`: Swift unit/network tests and Node bridge protocol tests.
 
-These directories belong to one app target. See [Architecture and code navigation](Docs/Architecture.md) for dependencies, state ownership, key flows, and where to make changes; [Samply integration details](Docs/SamplyBackend.md) covers the external contracts.
+These directories belong to one app target. See [Architecture and code navigation](Docs/Architecture.md) for dependencies, state ownership, key flows, and where to make changes; [Samply integration details](Docs/SamplyBackend.md) covers the external contracts. The [loading performance and correctness implementation plan](Docs/LoadingPerformanceImplementationPlan.md) combines the reviewed defects and loading-path refactors into staged Xcode Code Intelligence work; the [loading latency diagnosis](Docs/LoadingLatencyDiagnosis.md) records its supporting evidence.
 
 ## Implemented features
 
