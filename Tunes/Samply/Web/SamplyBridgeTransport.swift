@@ -41,7 +41,10 @@ final class WebKitBridgeTransport: SamplyBridgeTransport {
         try {
         if (!window.__tunesSamply) { \(adapter) }
         if (!window.__tunesSamply) throw new Error('Samply adapter unavailable.');
-        return JSON.stringify({payload: await window.__tunesSamply.command(command, args)});
+        const payload = await window.__tunesSamply.command(command, args);
+        const timing = args?.debugTiming && Number.isInteger(args.requestID)
+            ? window.__tunesSamply.timing?.(args.requestID) : null;
+        return JSON.stringify(timing ? {payload, timing} : {payload});
         } catch (error) {
             // Never send arbitrary page exception text (which can contain URLs or credentials).
             // Only fixed categories cross the bridge.

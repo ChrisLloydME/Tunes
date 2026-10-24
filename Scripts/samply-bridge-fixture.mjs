@@ -3,6 +3,7 @@
 // against plain Vue/Pinia store stubs.
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
+import {performance} from 'node:perf_hooks';
 
 export const script = readFileSync(new URL('../Tunes/Resources/SamplyBridge.js', import.meta.url), 'utf8');
 
@@ -134,7 +135,7 @@ export function fixture({origin = 'https://samply.app', anonymous = false,
             calls.push(['sharedRead', args]); return {boxes: server.boxes.map(doc => ({id: doc.id, data: doc.data()}))};
         }})
     };
-    const context = {location: {origin}, URL, setTimeout, clearTimeout, File, atob,
+    const context = {location: {origin}, URL, setTimeout, clearTimeout, File, atob, performance,
         // Replace only the module-loading boundary; all adapter behavior runs unchanged.
         __fixtureImport: async () => dataAPI,
         document: {querySelector(selector) {

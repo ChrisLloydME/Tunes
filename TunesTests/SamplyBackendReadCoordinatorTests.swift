@@ -38,6 +38,18 @@ struct SamplyBackendReadCoordinatorTests {
 
     private let failureJSON = #"{"failure":"timedOut"}"#
 
+    private let browseTimedJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[{"id":"album-a","name":"Seed","projectID":"project-a",\
+    "playerID":"player-a","shareID":"share-a","artist":"Artist","canUpload":false,"isOwned":true}],\
+    "routeID":"share-a","projectID":"project-a","boxesReady":true,\
+    "boxes":[{"id":"track-a","name":"Track","kind":"file","isAudio":true,\
+    "isProcessing":false,"childIDs":[]}],\
+    "capabilities":["library","boxes","playback","browse"]},\
+    "timing":{"routerMilliseconds":30,"boxesMilliseconds":70,\
+    "responseMilliseconds":4,"totalMilliseconds":104}}
+    """
+
     private func waitUntil(_ condition: () -> Bool, _ message: String) async {
         for _ in 0..<1_000 {
             if condition() { return }
@@ -234,6 +246,41 @@ struct SamplyBackendReadCoordinatorTests {
             #expect(error is CancellationError)
         }
         #expect(backend.library.first?.name == "Refreshed")
+    }
+
+    @Test func navigationTraceCorrelatesBridgePhasesAndPublication() async throws {
+        let transport = ControllableBridgeTransport()
+        let diagnostics = SamplyDiagnostics(isEnabled: true)
+        let session = SamplyWebSession(diagnostics: diagnostics, transport: transport)
+        let backend = SamplyBackend(tokens: MemoryTokenStore(), diagnostics: diagnostics,
+                                    web: session)
+        let seedTask = Task { await backend.recover(.library) }
+        await waitUntil({ transport.count == 1 }, "the seed read did not start")
+        transport.complete(0, with: seedJSON)
+        await seedTask.value
+        let item = try #require(backend.library.first)
+
+        backend.select(item)
+        await waitUntil({ transport.count == 2 }, "the browse did not start")
+        let rawID = try #require(transport.invocations[1].arguments["requestID"] as? Int)
+        transport.complete(1, with: browseTimedJSON)
+        await waitUntil({
+            if case .loaded = backend.albumLoadState { return true }
+            return false
+        }, "the browse did not publish")
+
+        let operation = diagnostics.loadingTrace.operation(id: UInt64(rawID))
+        #expect(operation?.stages.contains(where: { $0.stage == .bridgeStarted }) == true)
+        #expect(operation?.stages.contains(where: { $0.stage == .payloadDecoded }) == true)
+        #expect(operation?.stages.contains(where: { $0.stage == .selection }) == true)
+        #expect(operation?.stages.contains(where: { $0.stage == .contentPublished }) == true)
+        let router = operation?.stages.first { $0.stage == .routerSettled }
+        let boxes = operation?.stages.first { $0.stage == .boxesReady }
+        let response = operation?.stages.first { $0.stage == .responseBuilt }
+        #expect(abs((router?.duration ?? 0) - 0.03) < 0.0001)
+        #expect(abs((boxes?.duration ?? 0) - 0.07) < 0.0001)
+        #expect(abs((response?.duration ?? 0) - 0.004) < 0.0001)
+        #expect(backend.boxes.map(\.id) == ["track-a"])
     }
 
     @Test func automaticRecoveryStopsAfterThreeAttemptsAndDoesNotRestart() async {

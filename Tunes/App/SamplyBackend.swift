@@ -83,7 +83,7 @@ final class SamplyBackend {
                                                      credentials: credentials)
         projectCreation.onLibraryRefreshed = { [weak self] items in
             guard let self else { return }
-            self.content.acceptLibrary(items)
+            if self.content.acceptLibrary(items) { self.tracePublication() }
             self.noteFullContentAccepted()
         }
         projectCreation.onProjectOpened = { [weak self] item, snapshot in
@@ -228,21 +228,23 @@ final class SamplyBackend {
             record(.sessionRestoration, since: sessionStartedAt)
             hasRecordedSessionRestoration = true
         }
+        var published = false
         if state.libraryReady {
             if !hasRecordedLibraryAcceptance, let sessionStartedAt {
                 record(.libraryAcceptance, since: sessionStartedAt,
                        itemCount: state.library.count)
                 hasRecordedLibraryAcceptance = true
             }
-            content.acceptLibrary(state.library)
+            published = content.acceptLibrary(state.library) || published
         }
         playback.applySnapshot(state)
         if !isBrowsing, let selectedItem,
            state.hasLoadedBoxes(for: selectedItem, groupID: folderPath.last?.id,
                                 expectedProjectID: selectedItem.projectID) {
-            content.acceptBoxes(state.boxes)
+            published = content.acceptBoxes(state.boxes) || published
             albumLoadState = .loaded
         }
+        if published { tracePublication() }
     }
 
     /// Explicit command results and accepted content reads count as a fresh
@@ -251,6 +253,24 @@ final class SamplyBackend {
     private func noteFullContentAccepted() {
         pollSchedule.recordFullRead(at: clock.now(), succeeded: true,
                                     generation: pollSchedule.invalidationGeneration)
+    }
+
+    private func tracePublication() {
+        guard let operationID = web.lastContentOperationID,
+              let elapsed = web.lastContentOperationElapsed else { return }
+        diagnostics.loadingTrace.record(
+            stage: .contentPublished, operationID: operationID,
+            elapsed: elapsed, duration: 0,
+            itemCount: content.library.count + content.boxes.count)
+    }
+
+    private func traceSelection(since startedAt: TimeInterval, itemCount: Int,
+                                outcome: SamplyDiagnosticOutcome = .success) {
+        guard let operationID = web.lastContentOperationID else { return }
+        diagnostics.loadingTrace.record(
+            stage: .selection, operationID: operationID,
+            elapsed: clock.now() - startedAt, duration: 0,
+            itemCount: itemCount, outcome: outcome)
     }
 
     /// Diagnostics carry only fixed stages and counts; never names, URLs, or IDs.
@@ -401,13 +421,15 @@ final class SamplyBackend {
                 guard generation == selectionGeneration else { return }
                 if state.hasLoadedBoxes(for: item, groupID: groupID,
                                         expectedProjectID: item.projectID) {
-                    content.acceptBoxes(state.boxes)
+                    if content.acceptBoxes(state.boxes) { tracePublication() }
                     albumLoadState = .loaded
                     noteFullContentAccepted()
                     record(.selection, since: startedAt, itemCount: state.boxes.count)
+                    traceSelection(since: startedAt, itemCount: state.boxes.count)
                 } else {
                     albumLoadState = .failed
                     record(.selection, since: startedAt, outcome: .failure)
+                    traceSelection(since: startedAt, itemCount: 0, outcome: .failure)
                     recordFailure(SamplyError.invalidResponse)
                 }
                 isBrowsing = false
@@ -417,6 +439,8 @@ final class SamplyBackend {
                 albumLoadState = .failed
                 if !Task.isCancelled {
                     record(.selection, since: startedAt, outcome: SamplyDiagnosticOutcome(error))
+                    traceSelection(since: startedAt, itemCount: 0,
+                                   outcome: SamplyDiagnosticOutcome(error))
                     recordFailure(error)
                 }
             }
@@ -666,10 +690,11 @@ final class SamplyBackend {
         guard sessionGeneration == self.sessionGeneration, accountID == self.accountID,
               accountID == web.account?.uid, state.account?.uid == accountID,
               !web.isSigningOut else { throw CancellationError() }
+        var published = false
         switch page {
         case .library:
             guard state.libraryReady else { throw SamplyError.invalidResponse }
-            content.acceptLibrary(state.library)
+            published = content.acceptLibrary(state.library)
             noteFullContentAccepted()
             record(.serverRefresh, since: startedAt, itemCount: state.library.count)
         case .album(let routeID, let groupID):
@@ -682,11 +707,12 @@ final class SamplyBackend {
                                        expectedProjectID: selectedItem.projectID) else {
                 throw SamplyError.invalidResponse
             }
-            content.acceptBoxes(state.boxes)
+            published = content.acceptBoxes(state.boxes)
             albumLoadState = .loaded
             noteFullContentAccepted()
             record(.serverRefresh, since: startedAt, itemCount: state.boxes.count)
         }
+        if published { tracePublication() }
         // Refresh only updates page data. The media engine and native playback stay intact.
         error = nil
         hasTransientError = false
@@ -751,10 +777,11 @@ final class SamplyBackend {
         opened.canUpload = true
         invalidateSelection()
         selectedItem = opened
-        content.acceptBoxes(snapshot.boxes)
+        let boxesPublished = content.acceptBoxes(snapshot.boxes)
         albumLoadState = .loaded
-        content.replaceLibraryItem(opened)
+        let itemPublished = content.replaceLibraryItem(opened)
         noteFullContentAccepted()
+        if boxesPublished || itemPublished { tracePublication() }
     }
 
     private func invalidateSelection() {

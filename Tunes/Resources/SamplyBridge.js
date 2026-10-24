@@ -15,6 +15,9 @@
     // ones so an unresolved request can never be reactivated.
     const supersededRequests = new Set();
     const activeRequests = new Set();
+    // Opt-in, bounded phase timing for Debug traces. Values are durations only;
+    // raw JS clocks never cross the bridge.
+    const requestTimings = new Map();
     const finite = (v, fallback = 0) => typeof v === 'number' && Number.isFinite(v) ? v : fallback;
     const text = v => typeof v === 'string' ? v : undefined;
     function globals() {
@@ -89,6 +92,36 @@
     }
     function assertRequestActive(args) {
         if (!requestActive(args)) throw supersededError();
+    }
+    function beginTiming(args) {
+        if (!args?.debugTiming || !Number.isInteger(args.requestID)) return;
+        requestTimings.set(args.requestID, {started: performance.now()});
+        if (requestTimings.size > 64)
+            requestTimings.delete(requestTimings.keys().next().value);
+    }
+    function markTiming(args, phase) {
+        const entry = requestTimings.get(args?.requestID);
+        if (!entry || entry[phase] !== undefined) return;
+        entry[phase] = performance.now();
+    }
+    function discardTiming(args) {
+        if (Number.isInteger(args?.requestID)) requestTimings.delete(args.requestID);
+    }
+    function takeTiming(requestID) {
+        const entry = requestTimings.get(requestID);
+        if (!entry) return null;
+        requestTimings.delete(requestID);
+        const end = performance.now();
+        const since = (from, fallback) => Math.max(0, from - fallback);
+        const routerMilliseconds = entry.routerSettled === undefined ? null
+            : since(entry.routerSettled, entry.started);
+        const boxesMilliseconds = entry.boxesReady === undefined ? null
+            : since(entry.boxesReady, entry.routerSettled ?? entry.started);
+        const responseMilliseconds = entry.responseBuilt === undefined ? null
+            : since(entry.responseBuilt,
+                entry.boxesReady ?? entry.routerSettled ?? entry.started);
+        return {routerMilliseconds, boxesMilliseconds, responseMilliseconds,
+            totalMilliseconds: Math.max(0, end - entry.started)};
     }
     const image = artwork => text(artwork) || text(artwork?.small?.src) || text(artwork?.medium?.src);
     function libraryView(items, auth, lib) {
@@ -327,6 +360,7 @@
         // player resolves that link and replaces the path with the live share ID.
         if (typeof args.token === 'string' && args.token.length) query.token = args.token;
         await globals().$router.push({path: '/p/' + encodeURIComponent(id), query});
+        markTiming(args, 'routerSettled');
         assertRequestActive(args);
         await waitFor(() => {
             const p = store('player'), b = store('boxes');
@@ -335,6 +369,7 @@
                 b?.loadingBoxes === false && Array.isArray(b.boxViewModelsCurrentLevel) &&
                 (args.groupID ? b.currentLevelId === args.groupID : !b.currentLevelId);
         }, ticket, args);
+        markTiming(args, 'boxesReady');
         assertRequestActive(args);
         const player = store('player');
         if (typeof args.projectID === 'string' && args.projectID &&
@@ -457,8 +492,14 @@
         if (name === 'cancel') { markSuperseded(args.requestID); return true; }
         const requestID = args?.requestID;
         if (Number.isInteger(requestID)) activeRequests.add(requestID);
+        beginTiming(args);
         try {
-            return await performCommand(name, args);
+            const result = await performCommand(name, args);
+            markTiming(args, 'responseBuilt');
+            return result;
+        } catch (error) {
+            discardTiming(args);
+            throw error;
         } finally {
             // The command has settled, so no later result can apply. Remove
             // both lifecycle entries instead of accumulating a cancelled-ID log.
@@ -468,5 +509,5 @@
             }
         }
     }
-    window.__tunesSamply = Object.freeze({version: 1, command});
+    window.__tunesSamply = Object.freeze({version: 1, command, timing: takeTiming});
 })();

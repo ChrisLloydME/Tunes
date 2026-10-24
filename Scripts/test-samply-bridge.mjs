@@ -521,6 +521,48 @@ test('fixtures preserve folder, version, processing, and empty-box semantics for
     }
 });
 
+test('debug timing separates router wait from data readiness', async () => {
+    const routerHeavy = fixture();
+    const originalPush = routerHeavy.router.push.bind(routerHeavy.router);
+    routerHeavy.router.push = async args => {
+        await new Promise(resolve => setTimeout(resolve, 40));
+        return originalPush(args);
+    };
+    await routerHeavy.bridge.command('browse', {
+        routeID: 'share-1', requestID: 401, debugTiming: true
+    });
+    const routerTiming = routerHeavy.bridge.timing(401);
+    assert.deepEqual(Object.keys(routerTiming).sort(), [
+        'boxesMilliseconds', 'responseMilliseconds', 'routerMilliseconds', 'totalMilliseconds'
+    ]);
+    assert.ok(routerTiming.routerMilliseconds >= 30);
+    assert.ok(routerTiming.boxesMilliseconds <= 30);
+    assert.ok(routerTiming.totalMilliseconds >= routerTiming.routerMilliseconds);
+
+    const dataHeavy = fixture();
+    dataHeavy.player.playerBoxesLoading = true;
+    setTimeout(() => { dataHeavy.player.playerBoxesLoading = false; }, 80);
+    await dataHeavy.bridge.command('browse', {
+        routeID: 'share-1', requestID: 402, debugTiming: true
+    });
+    const dataTiming = dataHeavy.bridge.timing(402);
+    assert.ok(dataTiming.routerMilliseconds <= 30);
+    assert.ok(dataTiming.boxesMilliseconds >= 70);
+    assert.ok(dataTiming.totalMilliseconds >= dataTiming.boxesMilliseconds);
+});
+
+test('phase timing is omitted without the debug flag and stays bounded', async () => {
+    const f = fixture();
+    await f.bridge.command('browse', {routeID: 'share-1', requestID: 403});
+    assert.equal(f.bridge.timing(403), null);
+
+    for (let requestID = 1; requestID <= 70; requestID++) {
+        await f.bridge.command('snapshot', {requestID, debugTiming: true});
+    }
+    assert.equal(f.bridge.timing(1), null);
+    assert.notEqual(f.bridge.timing(70), null);
+});
+
 test('a superseded request drops its late refresh result without touching playback', async () => {
     const f = fixture();
     const before = playingState(f);

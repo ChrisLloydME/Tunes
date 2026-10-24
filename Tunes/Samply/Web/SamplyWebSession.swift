@@ -36,8 +36,20 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     @ObservationIgnored private var pendingInvocations: [UInt64: PendingBridgeInvocation] = [:]
     @ObservationIgnored private let sleeper: any Sleeper
     @ObservationIgnored private let deadlinePolicy: SamplyBridgeDeadlinePolicy
+    @ObservationIgnored private(set) var lastContentOperationID: UInt64?
+    @ObservationIgnored private(set) var lastContentOperationStartedAt: TimeInterval?
+    @ObservationIgnored private var startupTraceOperationID: UInt64?
+    @ObservationIgnored private var startupTraceStartedAt: TimeInterval?
+    @ObservationIgnored private var startupSnapshotPending = false
+    @ObservationIgnored private var startupRecordedAdapter = false
+    @ObservationIgnored private var startupRecordedAuthentication = false
+    @ObservationIgnored private var startupRecordedLibrary = false
 
     var pollInterval: Duration { bridgeHealth.pollInterval(at: clock.now()) }
+    var lastContentOperationElapsed: TimeInterval? {
+        guard let startedAt = lastContentOperationStartedAt else { return nil }
+        return clock.now() - startedAt
+    }
     var documentGeneration: Int { generation }
     @ObservationIgnored private let script: String
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
@@ -120,6 +132,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard !hasStarted, !isSigningOut else { return }
         hasStarted = true
         authenticationState = .checking
+        beginStartupTraceIfNeeded()
         // Keep the same WKWebView attached to an app-owned window even when ordered out.
         // Login and background playback therefore share one media engine and website session.
         makeWindowIfNeeded()
@@ -247,6 +260,8 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             sessionHistory.accept(state.authenticationState)
             runtimeSnapshot = state
             authenticationState = state.authenticationState
+            recordStartupAdapterUsable()
+            recordStartupAuthentication(state.authenticationState)
             if state.authenticationState == .signedIn { dismissSignIn() }
             bridgeHealth.reset()
             connectionError = nil
@@ -277,12 +292,17 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         isRefreshingSnapshot = true
         defer { isRefreshingSnapshot = false }
         let stamp = generation
+        let startupTraceID = startupSnapshotPending ? startupTraceOperationID : nil
+        startupSnapshotPending = false
         do {
-            let state: WebSnapshot = try await call("snapshot")
+            let state: WebSnapshot = try await call("snapshot", arguments: [:],
+                                                     traceOperationID: startupTraceID)
             try Task.checkCancellation()
             guard generation == stamp else { return false }
             // A newer/different contract must never silently drive the native library.
             try state.validateVersion()
+            recordStartupAuthentication(state.authenticationState)
+            recordStartupLibraryReady(state.libraryReady)
             profile.accept(state.account, authentication: state.authenticationState)
             sessionHistory.accept(state.authenticationState)
             snapshot = state
@@ -310,6 +330,11 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     }
 
     func call<T: Decodable>(_ command: String, arguments: [String: Any] = [:]) async throws -> T {
+        try await call(command, arguments: arguments, traceOperationID: nil)
+    }
+
+    func call<T: Decodable>(_ command: String, arguments: [String: Any],
+                            traceOperationID: UInt64?) async throws -> T {
         guard !isSigningOut else { throw CancellationError() }
         if transportOverride == nil {
             guard !script.isEmpty, webView.url?.host == "samply.app",
@@ -321,13 +346,25 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
             guard current.supports(feature.capability) else { throw feature.missingError }
         }
         let stamp = generation
-        let operationID = diagnostics.nextOperationID()
+        let operationID = traceOperationID ?? diagnostics.nextOperationID()
         // The opaque ID lets the adapter drop late results after a native
         // timeout without exposing account, URL, or resource data.
         var arguments = arguments
         arguments["requestID"] = Int(operationID)
         let category = SamplyDiagnosticCommand(command: command)
         let startedAt = clock.now()
+        if ["snapshot", "browse", "refreshPage"].contains(command) {
+            lastContentOperationID = operationID
+            lastContentOperationStartedAt = startedAt
+        }
+        if diagnostics.loadingTrace.isEnabled {
+            if diagnostics.loadingTrace.operation(id: operationID) == nil {
+                diagnostics.loadingTrace.beginOperation(id: operationID, command: category)
+            }
+            diagnostics.loadingTrace.record(stage: .bridgeStarted, operationID: operationID,
+                                            elapsed: 0, duration: 0)
+            arguments["debugTiming"] = true
+        }
         let result: Any?
         do {
             result = try await invoke(command: command, arguments: arguments, operationID: operationID)
@@ -359,12 +396,22 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
                 stage: .responseDecoding, command: category, operationID: operationID,
                 duration: clock.now() - decodeStartedAt, responseBytes: data.count,
                 outcome: .failure))
+            diagnostics.loadingTrace.record(
+                stage: .payloadDecoded, operationID: operationID,
+                elapsed: clock.now() - startedAt, duration: clock.now() - decodeStartedAt,
+                responseBytes: data.count, outcome: .failure)
             recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .failure)
             throw SamplyError.invalidResponse
         }
+        let decodeDuration = clock.now() - decodeStartedAt
         diagnostics.record(SamplyDiagnosticSample(
             stage: .responseDecoding, command: category, operationID: operationID,
-            duration: clock.now() - decodeStartedAt, responseBytes: data.count))
+            duration: decodeDuration, responseBytes: data.count))
+        recordBridgeTiming(response.timing, operationID: operationID)
+        diagnostics.loadingTrace.record(
+            stage: .payloadDecoded, operationID: operationID,
+            elapsed: clock.now() - startedAt, duration: decodeDuration,
+            responseBytes: data.count)
         if let failure = response.failure {
             let error = Self.bridgeError(for: failure)
             recordInvocation(category, operationID, startedAt, bytes: data.count,
@@ -382,6 +429,76 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         }
         recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .success)
         return payload
+    }
+
+    private func recordBridgeTiming(_ timing: SamplyBridgeTiming?, operationID: UInt64) {
+        guard diagnostics.loadingTrace.isEnabled, let timing else { return }
+        var elapsed = 0.0
+        if let milliseconds = timing.routerMilliseconds, milliseconds >= 0 {
+            let duration = milliseconds / 1000
+            elapsed += duration
+            diagnostics.loadingTrace.record(stage: .routerSettled, operationID: operationID,
+                                            elapsed: elapsed, duration: duration)
+        }
+        if let milliseconds = timing.boxesMilliseconds, milliseconds >= 0 {
+            let duration = milliseconds / 1000
+            elapsed += duration
+            diagnostics.loadingTrace.record(stage: .boxesReady, operationID: operationID,
+                                            elapsed: elapsed, duration: duration)
+        }
+        if let milliseconds = timing.responseMilliseconds, milliseconds >= 0 {
+            let duration = milliseconds / 1000
+            elapsed += duration
+            diagnostics.loadingTrace.record(stage: .responseBuilt, operationID: operationID,
+                                            elapsed: elapsed, duration: duration)
+        }
+    }
+
+    private func beginStartupTraceIfNeeded() {
+        guard diagnostics.loadingTrace.isEnabled else {
+            startupTraceOperationID = nil
+            startupTraceStartedAt = nil
+            return
+        }
+        let id = diagnostics.nextOperationID()
+        startupTraceOperationID = id
+        startupTraceStartedAt = clock.now()
+        startupSnapshotPending = true
+        startupRecordedAdapter = false
+        startupRecordedAuthentication = false
+        startupRecordedLibrary = false
+        diagnostics.loadingTrace.beginOperation(id: id, command: nil)
+        recordStartupTrace(.requested)
+    }
+
+    private func recordStartupTrace(_ stage: SamplyLoadingTraceStage,
+                                    itemCount: Int = 0,
+                                    outcome: SamplyDiagnosticOutcome = .success) {
+        guard diagnostics.loadingTrace.isEnabled,
+              let id = startupTraceOperationID,
+              let startedAt = startupTraceStartedAt else { return }
+        diagnostics.loadingTrace.record(
+            stage: stage, operationID: id,
+            elapsed: clock.now() - startedAt, duration: 0,
+            itemCount: itemCount, outcome: outcome)
+    }
+
+    private func recordStartupAdapterUsable() {
+        guard !startupRecordedAdapter else { return }
+        startupRecordedAdapter = true
+        recordStartupTrace(.adapterUsable)
+    }
+
+    private func recordStartupAuthentication(_ state: WebAuthenticationState) {
+        guard state != .checking, !startupRecordedAuthentication else { return }
+        startupRecordedAuthentication = true
+        recordStartupTrace(.authenticationResolved)
+    }
+
+    private func recordStartupLibraryReady(_ ready: Bool) {
+        guard ready, !startupRecordedLibrary else { return }
+        startupRecordedLibrary = true
+        recordStartupTrace(.webLibraryReady)
     }
 
     /// Fixed feature mapping so a broken data export disables only refresh or
@@ -539,6 +656,16 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         window?.orderOut(nil)
     }
 
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        recordStartupTrace(.documentCommitted)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === self.webView else { return }
+        recordStartupTrace(.documentFinished)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard webView === self.webView else { return }
         beginNewDocumentGeneration()
@@ -631,7 +758,15 @@ private enum SamplyBridgeFeature {
     }
 }
 
+private struct SamplyBridgeTiming: Decodable {
+    let routerMilliseconds: Double?
+    let boxesMilliseconds: Double?
+    let responseMilliseconds: Double?
+    let totalMilliseconds: Double?
+}
+
 private struct SamplyBridgeResponse<Payload: Decodable>: Decodable {
     let payload: Payload?
     let failure: String?
+    let timing: SamplyBridgeTiming?
 }

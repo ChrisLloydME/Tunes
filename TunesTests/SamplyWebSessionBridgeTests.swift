@@ -42,6 +42,13 @@ struct SamplyWebSessionBridgeTests {
     "libraryReady":true,"library":[],"boxesReady":false,"boxes":[],"capabilities":["library"]}}
     """
 
+    private let timedSnapshotJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[],"boxesReady":false,"boxes":[],"capabilities":["library"]},\
+    "timing":{"routerMilliseconds":40,"boxesMilliseconds":80,\
+    "responseMilliseconds":5,"totalMilliseconds":125}}
+    """
+
     private func waitForInvocation(_ transport: ControllableBridgeTransport,
                                    count: Int = 1) async {
         for _ in 0..<500 {
@@ -66,6 +73,29 @@ struct SamplyWebSessionBridgeTests {
         #expect(diagnostics.aggregate(stage: .bridgeInvocation)?.responseBytes == snapshotJSON.utf8.count)
         #expect(diagnostics.aggregate(stage: .responseDecoding)?.count == 1)
         #expect(diagnostics.aggregate(stage: .bridgeInvocation)?.attempts == 1)
+    }
+
+    @Test func decodedPhaseTimingIsRecordedUnderTheBridgeOperation() async throws {
+        let transport = ControllableBridgeTransport()
+        let diagnostics = SamplyDiagnostics(isEnabled: true)
+        let session = SamplyWebSession(diagnostics: diagnostics, transport: transport)
+        let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+        #expect(transport.invocations[0].arguments["debugTiming"] as? Bool == true)
+        let rawID = try #require(transport.invocations[0].arguments["requestID"] as? Int)
+        transport.complete(0, with: timedSnapshotJSON)
+        _ = try await task.value
+
+        let operation = diagnostics.loadingTrace.operation(id: UInt64(rawID))
+        #expect(operation?.stages.contains(where: { $0.stage == .bridgeStarted }) == true)
+        #expect(operation?.stages.contains(where: { $0.stage == .payloadDecoded }) == true)
+        let router = operation?.stages.first { $0.stage == .routerSettled }
+        let boxes = operation?.stages.first { $0.stage == .boxesReady }
+        let response = operation?.stages.first { $0.stage == .responseBuilt }
+        #expect(abs((router?.duration ?? 0) - 0.04) < 0.0001)
+        #expect(abs((boxes?.duration ?? 0) - 0.08) < 0.0001)
+        #expect(abs((response?.duration ?? 0) - 0.005) < 0.0001)
+        #expect(abs((boxes?.elapsed ?? 0) - 0.12) < 0.0001)
     }
 
     @Test func neverCompletingInvocationReleasesOnGenerationChange() async {
