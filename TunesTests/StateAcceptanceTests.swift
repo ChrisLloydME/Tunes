@@ -2,6 +2,41 @@ import Foundation
 import Testing
 @testable import Tunes
 
+private final class AcceptanceNotificationCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func increment() { lock.withLock { value += 1 } }
+    var count: Int { lock.withLock { value } }
+}
+
+@MainActor
+private final class AcceptanceObservationProbe {
+    enum Field { case library, boxes }
+
+    private let backend: SamplyBackend
+    private let field: Field
+    private let counter: AcceptanceNotificationCounter
+
+    init(backend: SamplyBackend, field: Field, counter: AcceptanceNotificationCounter) {
+        self.backend = backend
+        self.field = field
+        self.counter = counter
+    }
+
+    func observe() {
+        let counter = self.counter
+        withObservationTracking {
+            switch field {
+            case .library: _ = backend.library
+            case .boxes: _ = backend.boxes
+            }
+        } onChange: { [weak self] in
+            counter.increment()
+            Task { @MainActor [weak self] in self?.observe() }
+        }
+    }
+}
+
 @MainActor
 struct StateAcceptanceTests {
     private func item(_ id: String, name: String = "Album", artwork: String? = nil,
@@ -18,8 +53,85 @@ struct StateAcceptanceTests {
                versionName: version, childIDs: [])
     }
 
+    private func makeBackend() -> SamplyBackend {
+        SamplyBackend(tokens: MemoryTokenStore(), diagnostics: nil,
+                      web: SamplyWebSession(diagnostics: nil,
+                                            transport: ControllableBridgeTransport()))
+    }
+
+    private func waitUntil(_ condition: @escaping () -> Bool, _ message: String) async {
+        for _ in 0..<400 {
+            if condition() { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        Issue.record(Comment(rawValue: message))
+    }
+
+    @Test func equalContentDoesNotNotifyBackendObservers() async {
+        let backend = makeBackend()
+        let libraryCounter = AcceptanceNotificationCounter()
+        let boxCounter = AcceptanceNotificationCounter()
+        let libraryProbe = AcceptanceObservationProbe(backend: backend, field: .library,
+                                                      counter: libraryCounter)
+        let boxProbe = AcceptanceObservationProbe(backend: backend, field: .boxes,
+                                                  counter: boxCounter)
+        libraryProbe.observe()
+        boxProbe.observe()
+
+        let library = [item("a"), item("b")]
+        backend.content.acceptLibrary(library)
+        await waitUntil({ libraryCounter.count == 1 }, "the Library change did not notify")
+        #expect(boxCounter.count == 0)
+        backend.content.acceptLibrary(library)
+        await Task.yield()
+        #expect(libraryCounter.count == 1)
+
+        let boxes = [box("one"), box("two")]
+        backend.content.acceptBoxes(boxes)
+        await waitUntil({ boxCounter.count == 1 }, "the box change did not notify")
+        #expect(libraryCounter.count == 1)
+        backend.content.acceptBoxes(boxes)
+        await Task.yield()
+        #expect(boxCounter.count == 1)
+
+        backend.content.acceptLibrary([item("a", name: "Renamed"), item("b")])
+        await waitUntil({ libraryCounter.count == 2 }, "the rename did not notify")
+        backend.content.acceptBoxes([box("one", processing: true), box("two")])
+        await waitUntil({ boxCounter.count == 2 }, "the processing change did not notify")
+        #expect(libraryCounter.count == 2)
+
+        #expect(!backend.content.replaceLibraryItem(item("a", name: "Renamed")))
+        await Task.yield()
+        #expect(libraryCounter.count == 2)
+        #expect(backend.content.replaceLibraryItem(
+            item("a", name: "Renamed", artwork: "https://x/new.png")))
+        await waitUntil({ libraryCounter.count == 3 }, "the in-place update did not notify")
+    }
+
+    @Test func clearingLoadedContentNotifiesBothObserversOnce() async {
+        let backend = makeBackend()
+        backend.content.acceptLibrary([item("a")])
+        backend.content.acceptBoxes([box("one")])
+        let libraryCounter = AcceptanceNotificationCounter()
+        let boxCounter = AcceptanceNotificationCounter()
+        let libraryProbe = AcceptanceObservationProbe(backend: backend, field: .library,
+                                                      counter: libraryCounter)
+        let boxProbe = AcceptanceObservationProbe(backend: backend, field: .boxes,
+                                                  counter: boxCounter)
+        libraryProbe.observe()
+        boxProbe.observe()
+
+        backend.content.clear()
+        await waitUntil({ libraryCounter.count == 1 }, "clear did not notify the Library")
+        #expect(boxCounter.count == 1)
+        backend.content.clear()
+        await Task.yield()
+        #expect(libraryCounter.count == 1)
+        #expect(boxCounter.count == 1)
+    }
+
     @Test func repeatedIdenticalLibraryAndBoxArraysCauseOneAssignment() {
-        var acceptance = SamplyContentAcceptance()
+        let acceptance = SamplyContentAcceptance()
         let library = [item("a"), item("b")]
         let boxes = [box("one"), box("two")]
         let firstLibrary = acceptance.acceptLibrary(library)
@@ -35,7 +147,7 @@ struct StateAcceptanceTests {
     }
 
     @Test func fieldAndOrderChangesAreStillAccepted() {
-        var acceptance = SamplyContentAcceptance()
+        let acceptance = SamplyContentAcceptance()
         _ = acceptance.acceptLibrary([item("a"), item("b")])
 
         let renamed = acceptance.acceptLibrary([item("a", name: "Renamed"), item("b")])
@@ -69,7 +181,7 @@ struct StateAcceptanceTests {
     }
 
     @Test func confirmedEmptyBoxReadIsAnExplicitAssignment() {
-        var acceptance = SamplyContentAcceptance()
+        let acceptance = SamplyContentAcceptance()
         _ = acceptance.acceptBoxes([box("one")])
         let cleared = acceptance.acceptBoxes([])
         #expect(cleared)
@@ -83,7 +195,7 @@ struct StateAcceptanceTests {
 
     @Test func createdProjectReplacementRequiresIdentityAndChange() {
         let original = item("a")
-        var acceptance = SamplyContentAcceptance()
+        let acceptance = SamplyContentAcceptance()
         _ = acceptance.acceptLibrary([original, item("b")])
         let unchanged = acceptance.replaceLibraryItem(original)
         let missing = acceptance.replaceLibraryItem(item("missing"))
