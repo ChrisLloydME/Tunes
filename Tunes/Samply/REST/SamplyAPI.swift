@@ -9,16 +9,19 @@ final class SamplyAPI {
     private let baseURL: URL
     private let diagnostics: SamplyDiagnostics
     private let retryPolicy: SamplyRESTRetryPolicy
+    private let deadlineSleeper: any Sleeper
     private var clock: any MonotonicClock { retryPolicy.monotonicClock }
 
     init(tokens: (any TokenStore)? = nil, session: URLSession? = nil,
          baseURL: URL = URL(string: "https://samply.app/api/v0")!,
          diagnostics: SamplyDiagnostics? = nil,
-         retryPolicy: SamplyRESTRetryPolicy? = nil) {
+         retryPolicy: SamplyRESTRetryPolicy? = nil,
+         deadlineSleeper: (any Sleeper)? = nil) {
         self.tokens = tokens ?? MemoryTokenStore()
         self.baseURL = baseURL
         self.diagnostics = diagnostics ?? .shared
         self.retryPolicy = retryPolicy ?? SamplyRESTRetryPolicy()
+        self.deadlineSleeper = deadlineSleeper ?? TaskSleeper()
         if let session { self.session = session }
         else {
             let config = URLSessionConfiguration.ephemeral
@@ -139,7 +142,16 @@ final class SamplyAPI {
             request.timeoutInterval = max(0.1, remaining)
             attemptCount = attempt + 1
             do {
-                let (data, response) = try await session.data(for: request)
+                let result: (Data, URLResponse)
+                if isGET {
+                    result = try await getData(for: request, deadline: deadline)
+                } else {
+                    // Mutations keep their existing timeout and uncertainty
+                    // semantics; only GETs get the active transfer deadline.
+                    result = try await session.data(for: request)
+                }
+                let (data, response) = result
+                if isGET { try Task.checkCancellation() }
                 guard let response = response as? HTTPURLResponse else {
                     throw SamplyError.invalidResponse
                 }
@@ -184,6 +196,124 @@ final class SamplyAPI {
         }
     }
 
+    /// One GET attempt with an absolute operation deadline. The waiter is
+    /// released at the deadline even if the transfer keeps producing data; the
+    /// active URLSession task is cancelled and its later completion ignored.
+    private func getData(for request: URLRequest,
+                         deadline: TimeInterval) async throws -> (Data, URLResponse) {
+        try Task.checkCancellation()
+        let remaining = deadline - clock.now()
+        guard remaining > 0 else { throw SamplyError.timedOut }
+        let attempt = SamplyRESTGetAttempt(
+            session: session, request: request, deadline: deadline,
+            clock: clock, sleeper: deadlineSleeper)
+        do {
+            let result = try await attempt.run()
+            try Task.checkCancellation()
+            guard clock.now() < deadline else { throw SamplyError.timedOut }
+            return result
+        } catch {
+            // A caller cancellation that raced the deadline still reports as
+            // cancellation, not as an expired operation.
+            try Task.checkCancellation()
+            throw error
+        }
+    }
+
+}
+
+/// Exactly-once settlement for one cancellable GET task. The deadline can
+/// resume the waiter while URLSession is still delivering an active response,
+/// then the task is cancelled and its eventual callback is ignored.
+@MainActor
+private final class SamplyRESTGetAttempt {
+    private let session: URLSession
+    private let request: URLRequest
+    private let deadline: TimeInterval
+    private let clock: any MonotonicClock
+    private let sleeper: any Sleeper
+    private var task: URLSessionDataTask?
+    private var deadlineTask: Task<Void, Never>?
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+    private var bufferedResult: Result<(Data, URLResponse), Error>?
+    private var isFinished = false
+
+    init(session: URLSession, request: URLRequest, deadline: TimeInterval,
+         clock: any MonotonicClock, sleeper: any Sleeper) {
+        self.session = session
+        self.request = request
+        self.deadline = deadline
+        self.clock = clock
+        self.sleeper = sleeper
+    }
+
+    func run() async throws -> (Data, URLResponse) {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if let bufferedResult {
+                    continuation.resume(with: bufferedResult)
+                    return
+                }
+                self.continuation = continuation
+                let task = session.dataTask(with: request) { [self] data, response, error in
+                    Task { @MainActor in
+                        complete(data: data, response: response, error: error)
+                    }
+                }
+                self.task = task
+                deadlineTask = Task { [self] in
+                    let remaining = deadline - clock.now()
+                    guard remaining > 0 else {
+                        finish(.failure(SamplyError.timedOut))
+                        return
+                    }
+                    do { try await sleeper.sleep(for: .seconds(remaining)) }
+                    catch { return }
+                    guard !Task.isCancelled else { return }
+                    finish(.failure(SamplyError.timedOut))
+                }
+                if !isFinished { task.resume() }
+            }
+        } onCancel: {
+            Task { @MainActor [self] in
+                finish(.failure(CancellationError()))
+            }
+        }
+    }
+
+    private func complete(data: Data?, response: URLResponse?, error: Error?) {
+        if let error {
+            // URLSession reports a locally cancelled task as URLError.cancelled.
+            // Preserve the caller's cancellation type regardless of which
+            // callback wins the race with our cancellation handler.
+            if let urlError = error as? URLError, urlError.code == .cancelled {
+                finish(.failure(CancellationError()))
+            } else {
+                finish(.failure(error))
+            }
+        } else if let data, let response {
+            finish(.success((data, response)))
+        } else {
+            finish(.failure(SamplyError.invalidResponse))
+        }
+    }
+
+    private func finish(_ result: Result<(Data, URLResponse), Error>) {
+        guard !isFinished else { return }
+        isFinished = true
+        deadlineTask?.cancel()
+        deadlineTask = nil
+        if case .failure = result {
+            task?.cancel()
+        }
+        task = nil
+        if let continuation {
+            self.continuation = nil
+            continuation.resume(with: result)
+        } else {
+            bufferedResult = result
+        }
+    }
 }
 
 /// Do not forward bearer credentials or signed PUTs through unexpected redirects.
