@@ -642,7 +642,11 @@ final class SamplyBackend {
         defer { waiter.finish(owner: self) }
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            return try await read.task.value
+            let state = try await read.task.value
+            // A sibling waiter may have kept the shared task alive after this
+            // caller was cancelled. It must not apply or return that success.
+            try Task.checkCancellation()
+            return state
         } onCancel: {
             // Cancelling one waiter must not cancel a read another waiter
             // still needs; the last release cancels the shared task.
@@ -656,6 +660,8 @@ final class SamplyBackend {
     private func applyPageRefresh(_ state: WebSnapshot, page: SamplyPage,
                                   selectionGeneration: Int, sessionGeneration: UInt64,
                                   accountID: String?, startedAt: TimeInterval) throws {
+        // Final cancellation check immediately before any content mutation.
+        try Task.checkCancellation()
         try state.validateVersion()
         guard sessionGeneration == self.sessionGeneration, accountID == self.accountID,
               accountID == web.account?.uid, state.account?.uid == accountID,
@@ -822,6 +828,10 @@ extension SamplyBackend: ProjectLibraryRefreshing {
     /// Library toolbar. Its coordinator still checks version, readiness, and
     /// account identity before applying the result.
     func refreshLibrarySnapshot(accountID: String) async throws -> WebSnapshot {
-        try await readPageSnapshot(.library, accountID: accountID)
+        let snapshot = try await readPageSnapshot(.library, accountID: accountID)
+        // The public creation boundary must not hand a success to a caller that
+        // was cancelled while its sibling kept the shared read alive.
+        try Task.checkCancellation()
+        return snapshot
     }
 }

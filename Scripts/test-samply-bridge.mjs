@@ -359,6 +359,10 @@ test('waits for the player subscription even when the boxes store already claims
 });
 
 const serverDocument = (id, data) => ({id, data: () => data});
+const libraryDocument = (id, name) => serverDocument(id, {
+    projectid: `project-${id}`, playerid: `player-${id}`, shareid: `share-${id}`,
+    snippet: {name, owner: 'user-a'}
+});
 function installRefreshedBoxModels(f) {
     let documents = [];
     Object.defineProperty(f.player, 'playerBoxes', {
@@ -554,6 +558,159 @@ test('a superseded browse stops waiting for a route it no longer owns', async ()
     await f.bridge.command('cancel', {requestID: 9});
     await rejected;
     f.player.playerBoxesLoading = false;
+});
+
+test('a cancelled refresh cannot overwrite a newer accepted refresh', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    const releases = [];
+    let readIndex = 0;
+    f.dataAPI.dZ = async () => {
+        const index = readIndex++;
+        await new Promise(resolve => { releases[index] = resolve; });
+        return {docs: [libraryDocument(`read-${index}`, `Read ${index}`)]};
+    };
+
+    const a = f.bridge.command('refreshPage', {page: 'library', requestID: 201});
+    const aRejected = assert.rejects(a, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setImmediate(resolve));
+    await f.bridge.command('cancel', {requestID: 201});
+
+    const b = f.bridge.command('refreshPage', {page: 'library', requestID: 202});
+    await new Promise(resolve => setImmediate(resolve));
+    releases[1]();
+    assert.equal((await b).library[0].name, 'Read 1');
+
+    // A finishes after B. Both the accepted result and the next snapshot keep B.
+    releases[0]();
+    await aRejected;
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.library.length, 1);
+    assert.equal(snapshot.library[0].name, 'Read 1');
+    assert.equal(readIndex, 2);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('cancelling a newer request leaves an older active read independent', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    const releases = [];
+    let readIndex = 0;
+    f.dataAPI.dZ = async () => {
+        const index = readIndex++;
+        await new Promise(resolve => { releases[index] = resolve; });
+        return {docs: [libraryDocument(`read-${index}`, `Read ${index}`)]};
+    };
+
+    const older = f.bridge.command('refreshPage', {page: 'library', requestID: 301});
+    await new Promise(resolve => setImmediate(resolve));
+    const newer = f.bridge.command('refreshPage', {page: 'library', requestID: 302});
+    const newerRejected = assert.rejects(newer, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setImmediate(resolve));
+    await f.bridge.command('cancel', {requestID: 302});
+
+    releases[0]();
+    assert.equal((await older).library[0].name, 'Read 0');
+    releases[1]();
+    await newerRejected;
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.library[0].name, 'Read 0');
+    assert.equal(readIndex, 2);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('a cancelled older refresh cannot overwrite a repeated read', async () => {
+    const f = fixture();
+    const before = playingState(f);
+    const releases = [];
+    let readIndex = 0;
+    f.dataAPI.dZ = async () => {
+        const index = readIndex++;
+        await new Promise(resolve => { releases[index] = resolve; });
+        return {docs: [libraryDocument(`read-${index}`, `Read ${index}`)]};
+    };
+
+    // A is cancelled, B succeeds, then A is requested again and succeeds.
+    const a = f.bridge.command('refreshPage', {page: 'library', requestID: 101});
+    const aRejected = assert.rejects(a, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setImmediate(resolve));
+    await f.bridge.command('cancel', {requestID: 101});
+
+    const b = f.bridge.command('refreshPage', {page: 'library', requestID: 102});
+    await new Promise(resolve => setImmediate(resolve));
+    releases[1]();
+    assert.equal((await b).library[0].name, 'Read 1');
+
+    const aAgain = f.bridge.command('refreshPage', {page: 'library', requestID: 103});
+    await new Promise(resolve => setImmediate(resolve));
+    releases[2]();
+    assert.equal((await aAgain).library[0].name, 'Read 2');
+
+    // The original A finishes last. Its tombstone must still be active.
+    releases[0]();
+    await aRejected;
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.library.length, 1);
+    assert.equal(snapshot.library[0].name, 'Read 2');
+    assert.equal(readIndex, 3);
+    assert.deepEqual(plain(f.audio), before);
+});
+
+test('expired request bookkeeping is bounded without reactivating an unresolved read', async () => {
+    const f = fixture();
+    f.server.library = [libraryDocument('stale', 'Stale result')];
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    f.dataAPI.dZ = async () => {
+        await gate;
+        return {docs: f.server.library};
+    };
+
+    const stale = f.bridge.command('refreshPage', {page: 'library', requestID: 1});
+    const rejected = assert.rejects(stale, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setImmediate(resolve));
+    await f.bridge.command('cancel', {requestID: 1});
+    // Many later cancellations advance the watermark. They must not make the
+    // unresolved request's late result eligible again.
+    for (let requestID = 2; requestID <= 80; requestID += 1)
+        await f.bridge.command('cancel', {requestID});
+    release();
+    await rejected;
+
+    const snapshot = await f.bridge.command('snapshot');
+    assert.equal(snapshot.library.length, 2);
+    assert.equal(snapshot.library.some(item => item.name === 'Stale result'), false);
+});
+
+test('a cancelled play load that finishes late is not replayed', async () => {
+    const f = fixture();
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const originalLoadBox = f.audio.loadBox.bind(f.audio);
+    let loads = 0;
+    f.audio.loadBox = async (box, options) => {
+        loads += 1;
+        await gate;
+        return originalLoadBox(box, options);
+    };
+
+    const play = f.bridge.command('playBox', {
+        fileID: 'file-1', routeID: 'share-1', requestID: 77
+    });
+    const rejected = assert.rejects(play, error => error.code === 'TUNES_SUPERSEDED');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(loads, 1);
+    await f.bridge.command('cancel', {requestID: 77});
+    release();
+    await rejected;
+
+    // The authorized action may already have started. It is never undone or
+    // automatically submitted a second time.
+    assert.equal(loads, 1);
+    assert.equal(f.audio.audioboxid, 'file-1');
+    assert.equal(f.calls.filter(call => call[0] === 'loadBox').length, 1);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(loads, 1);
 });
 
 test('cancelling a request does not undo audio that already started', async () => {

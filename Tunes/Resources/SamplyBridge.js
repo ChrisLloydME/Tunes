@@ -9,9 +9,12 @@
     if (window.__tunesSamply?.version === 1) return;
     let operation = 0;
     let refreshedLibrary = null;
-    // Opaque request IDs supplied by Tunes. A native timeout supersedes the ID
-    // so a result that arrives later is dropped instead of applied.
+    // Opaque request IDs supplied by Tunes. A native timeout or ordinary
+    // cancellation supersedes the ID so a result that arrives later is dropped.
+    // Cancelled IDs stay until their command settles, and eviction skips active
+    // ones so an unresolved request can never be reactivated.
     const supersededRequests = new Set();
+    const activeRequests = new Set();
     const finite = (v, fallback = 0) => typeof v === 'number' && Number.isFinite(v) ? v : fallback;
     const text = v => typeof v === 'string' ? v : undefined;
     function globals() {
@@ -65,11 +68,24 @@
     function markSuperseded(requestID) {
         if (!Number.isInteger(requestID)) return;
         supersededRequests.add(requestID);
-        if (supersededRequests.size > 64)
-            supersededRequests.delete(supersededRequests.values().next().value);
+        while (supersededRequests.size > 64) {
+            let evictable;
+            for (const id of supersededRequests) {
+                if (!activeRequests.has(id)) {
+                    evictable = id;
+                    break;
+                }
+            }
+            // Correctness first: an unresolved request keeps its expiry even
+            // if that temporarily exceeds the soft cap. Lifecycle cleanup
+            // removes it when the command settles.
+            if (evictable === undefined) break;
+            supersededRequests.delete(evictable);
+        }
     }
     function requestActive(args) {
-        return args?.requestID === undefined || !supersededRequests.has(args.requestID);
+        const requestID = args?.requestID;
+        return !Number.isInteger(requestID) || !supersededRequests.has(requestID);
     }
     function assertRequestActive(args) {
         if (!requestActive(args)) throw supersededError();
@@ -384,10 +400,7 @@
         if (a.error) throw operationError('Samply could not play this file.');
         return snapshot();
     }
-    async function command(name, args = {}) {
-        // Native timeout notification. This does not cancel already-started page
-        // work; it only prevents that request's late result from being applied.
-        if (name === 'cancel') { markSuperseded(args.requestID); return true; }
+    async function performCommand(name, args) {
         if (name === 'runtimeSnapshot') return runtimeSnapshot();
         if (name === 'snapshot') return snapshot();
         if (name === 'refreshPage') return await refreshPage(args);
@@ -396,6 +409,7 @@
             assertRequestActive(args);
             ++operation;
             await globals().$router.push(pageRoute(args));
+            assertRequestActive(args);
             return true;
         }
         if (name === 'browse') return await browse(args);
@@ -431,7 +445,28 @@
             await a.selectQuality(args.value, {inplace: true}); break;
         default: throw operationError('Unsupported Tunes command.');
         }
+        // The action may already have started; cancellation only suppresses
+        // this request's late success. It never undoes or replays the action.
+        assertRequestActive(args);
         return snapshot();
+    }
+    async function command(name, args = {}) {
+        // Native timeout/cancellation notification. This does not undo page
+        // work that already started; it only prevents that request's late
+        // result from being applied. A cancel may race ahead of its command.
+        if (name === 'cancel') { markSuperseded(args.requestID); return true; }
+        const requestID = args?.requestID;
+        if (Number.isInteger(requestID)) activeRequests.add(requestID);
+        try {
+            return await performCommand(name, args);
+        } finally {
+            // The command has settled, so no later result can apply. Remove
+            // both lifecycle entries instead of accumulating a cancelled-ID log.
+            if (Number.isInteger(requestID)) {
+                activeRequests.delete(requestID);
+                supersededRequests.delete(requestID);
+            }
+        }
     }
     window.__tunesSamply = Object.freeze({version: 1, command});
 })();

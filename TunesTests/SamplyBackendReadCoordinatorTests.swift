@@ -20,6 +20,22 @@ struct SamplyBackendReadCoordinatorTests {
     "capabilities":["library","boxes","playback","browse","refresh","ownership"]}}
     """
 
+    private let staleJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[{"id":"album-a","name":"Stale","projectID":"project-a",\
+    "playerID":"player-a","shareID":"share-a","artist":"Artist","canUpload":false,"isOwned":true}],\
+    "routeID":"share-1","projectID":"project-1","boxesReady":false,"boxes":[],\
+    "capabilities":["library","boxes","playback","browse","refresh","ownership"]}}
+    """
+
+    private let againJSON = """
+    {"payload":{"version":1,"account":{"uid":"fixture-account"},"authentication":"signedIn",\
+    "libraryReady":true,"library":[{"id":"album-a","name":"Again","projectID":"project-a",\
+    "playerID":"player-a","shareID":"share-a","artist":"Artist","canUpload":false,"isOwned":true}],\
+    "routeID":"share-1","projectID":"project-1","boxesReady":false,"boxes":[],\
+    "capabilities":["library","boxes","playback","browse","refresh","ownership"]}}
+    """
+
     private let failureJSON = #"{"failure":"timedOut"}"#
 
     private func waitUntil(_ condition: () -> Bool, _ message: String) async {
@@ -95,9 +111,13 @@ struct SamplyBackendReadCoordinatorTests {
 
         second.cancel()
         await Task.yield()
+        // Releasing one waiter must not notify the page or start another read.
+        #expect(transport.count == 2)
         transport.complete(1, with: refreshedJSON)
         await first.value
         await second.value
+        #expect(transport.invocations.map(\.command) == ["snapshot", "refreshPage"])
+        #expect(transport.count == 2)
         #expect(backend.library.first?.name == "Refreshed")
     }
 
@@ -107,9 +127,15 @@ struct SamplyBackendReadCoordinatorTests {
 
         let first = Task { await backend.refresh(.library) }
         await waitUntil({ transport.count == 2 }, "the first read did not start")
+        let requestID = transport.invocations[1].arguments["requestID"] as? Int
         first.cancel()
         await first.value
+        await waitUntil({ transport.count == 3 }, "the final waiter did not expire its request")
+        #expect(transport.invocations.map(\.command) == ["snapshot", "refreshPage", "cancel"])
+        #expect(transport.invocations[2].arguments["requestID"] as? Int == requestID)
         await waitUntil({ !backend.isRefreshing }, "the shared read stayed busy")
+        await Task.yield()
+        #expect(transport.count == 3, "the cancelled read was automatically replayed")
 
         // A late result for the cancelled read must not be committed.
         transport.complete(1, with: refreshedJSON)
@@ -117,9 +143,96 @@ struct SamplyBackendReadCoordinatorTests {
         #expect(backend.library.first?.name == "Seed")
 
         let second = Task { await backend.refresh(.library) }
-        await waitUntil({ transport.count == 3 }, "a fresh read did not start")
-        transport.complete(2, with: refreshedJSON)
+        await waitUntil({ transport.count == 4 }, "a fresh read did not start")
+        transport.complete(3, with: refreshedJSON)
         await second.value
+        #expect(backend.library.first?.name == "Refreshed")
+    }
+
+    @Test func cancelledReadCannotOverwriteANewerRead() async {
+        let (backend, _, transport) = makeBackend()
+        await seed(backend, transport)
+
+        let first = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 2 }, "read A did not start")
+        first.cancel()
+        await first.value
+        await waitUntil({ transport.count == 3 }, "read A did not expire its request")
+
+        let second = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 4 }, "read B did not start")
+        transport.complete(3, with: refreshedJSON)
+        await second.value
+        #expect(backend.library.first?.name == "Refreshed")
+
+        // A finishes after B. The late result must not replace B.
+        transport.complete(1, with: staleJSON)
+        await Task.yield()
+        #expect(backend.library.first?.name == "Refreshed")
+        #expect(transport.count == 4)
+    }
+
+    @Test func cancelledReadCannotOverwriteARepeatedRead() async {
+        let (backend, _, transport) = makeBackend()
+        await seed(backend, transport)
+
+        // A starts and is cancelled before the newer B read.
+        let first = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 2 }, "read A did not start")
+        first.cancel()
+        await first.value
+        await waitUntil({ transport.count == 3 }, "read A did not expire its request")
+
+        // B finishes first and is accepted.
+        let second = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 4 }, "read B did not start")
+        transport.complete(3, with: refreshedJSON)
+        await second.value
+        #expect(backend.library.first?.name == "Refreshed")
+
+        // A is requested again and accepted before the first A result arrives.
+        let third = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 5 }, "the repeated read did not start")
+        transport.complete(4, with: againJSON)
+        await third.value
+        #expect(backend.library.first?.name == "Again")
+
+        // The original A finishes last. Both its web result and native content
+        // must continue to show the newest accepted read.
+        transport.complete(1, with: staleJSON)
+        await Task.yield()
+        #expect(backend.library.first?.name == "Again")
+        #expect(transport.count == 5)
+        #expect(transport.invocations.map(\.command) ==
+                ["snapshot", "refreshPage", "cancel", "refreshPage", "refreshPage"])
+        #expect(!backend.hasTransientError)
+    }
+
+    @Test func cancelledSharedWaiterCannotReturnSuccessAfterSiblingFinishes() async {
+        let (backend, _, transport) = makeBackend()
+        await seed(backend, transport)
+
+        let toolbar = Task { await backend.refresh(.library) }
+        await waitUntil({ transport.count == 2 }, "the toolbar read did not start")
+        let creation = Task {
+            try await backend.refreshLibrarySnapshot(accountID: "fixture-account")
+        }
+        // Let the creation caller join the already-active shared read.
+        for _ in 0..<100 { await Task.yield() }
+        creation.cancel()
+        await Task.yield()
+        #expect(transport.count == 2)
+
+        // The toolbar waiter keeps the shared task alive; the cancelled caller
+        // must still fail instead of returning that success.
+        transport.complete(1, with: refreshedJSON)
+        await toolbar.value
+        do {
+            _ = try await creation.value
+            Issue.record("a cancelled shared waiter returned success")
+        } catch {
+            #expect(error is CancellationError)
+        }
         #expect(backend.library.first?.name == "Refreshed")
     }
 

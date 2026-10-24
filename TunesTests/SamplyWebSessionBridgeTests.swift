@@ -84,8 +84,37 @@ struct SamplyWebSessionBridgeTests {
             #expect(error is CancellationError)
         }
 
-        // A late completion from the obsolete document must not resume twice.
+        // A late completion from the obsolete document must not resume twice,
+        // and releasing an old-document request must not send its cancellation
+        // into any replacement document.
+        #expect(transport.count == 1)
         transport.complete(0, with: snapshotJSON)
+        await Task.yield()
+        #expect(transport.count == 1)
+    }
+
+    @Test func cancellationAfterDocumentReplacementDoesNotExpireTheReplacement() async throws {
+        let transport = ControllableBridgeTransport()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport)
+        let first: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+
+        session.beginNewDocumentGeneration()
+        first.cancel()
+        do {
+            _ = try await first.value
+            Issue.record("the old-document waiter should be cancelled")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        // No cancel notification may cross into a replacement document.
+        #expect(transport.count == 1)
+
+        let second: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport, count: 2)
+        #expect(transport.invocations.map(\.command) == ["snapshot", "snapshot"])
+        transport.complete(1, with: snapshotJSON)
+        #expect(try await second.value.account?.uid == "fixture-account")
     }
 
     @Test func obsoleteCompletionCannotSettleANewerDocumentRequest() async throws {
@@ -113,12 +142,13 @@ struct SamplyWebSessionBridgeTests {
         }
     }
 
-    @Test func cancellingTheWaiterStopsWaitingWithoutAnotherRequest() async {
+    @Test func cancellingTheWaiterSendsOneCancelWithoutReplayingTheCommand() async {
         let transport = ControllableBridgeTransport()
         let session = SamplyWebSession(diagnostics: SamplyDiagnostics(isEnabled: true),
                                        transport: transport)
         let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
         await waitForInvocation(transport)
+        let requestID = transport.invocations[0].arguments["requestID"] as? Int
         task.cancel()
         do {
             _ = try await task.value
@@ -126,8 +156,33 @@ struct SamplyWebSessionBridgeTests {
         } catch {
             #expect(error is CancellationError)
         }
-        #expect(transport.count == 1)
+        await waitForInvocation(transport, count: 2)
+        #expect(transport.invocations.map(\.command) == ["snapshot", "cancel"])
+        #expect(transport.invocations[1].arguments["requestID"] as? Int == requestID)
+        // A late WebKit result is ignored; the business command is not replayed.
         transport.complete(0, with: snapshotJSON)
+        await Task.yield()
+        #expect(transport.count == 2)
+    }
+
+    @Test func completedResultCannotOvertakeCallerCancellation() async {
+        let transport = ControllableBridgeTransport()
+        let session = SamplyWebSession(diagnostics: nil, transport: transport)
+        let task: Task<WebSnapshot, Error> = Task { try await session.call("snapshot") }
+        await waitForInvocation(transport)
+
+        // The WebKit success is delivered before the queued cancellation
+        // handler runs. The caller must still observe its cancellation.
+        task.cancel()
+        transport.complete(0, with: snapshotJSON)
+        do {
+            _ = try await task.value
+            Issue.record("a cancelled caller accepted a completed result")
+        } catch {
+            #expect(error is CancellationError)
+        }
+        await Task.yield()
+        #expect(transport.count == 1)
     }
 
     @Test func fixedFailureCodesMapToTypedBridgeErrors() async throws {
@@ -250,10 +305,18 @@ struct SamplyBridgeDeadlineTests {
             Issue.record("unexpected error: \(error)")
         }
 
+        // The page is told to expire exactly this request, not to replay the
+        // business command.
+        await waitForInvocation(transport, count: 2)
+        #expect(transport.invocations.map(\.command) == ["snapshot", "cancel"])
+        #expect(transport.invocations[1].arguments["requestID"] as? Int ==
+                transport.invocations[0].arguments["requestID"] as? Int)
+
         // The WebKit completion arrives after the native timeout. It must be
         // ignored rather than resuming the continuation a second time.
         transport.complete(0, with: snapshotJSON)
         await Task.yield()
+        #expect(transport.count == 2)
     }
 
     @Test func successRacingTheDeadlineWinsOnceAndCancelsTheDeadline() async throws {
@@ -268,6 +331,8 @@ struct SamplyBridgeDeadlineTests {
         let snapshot = try await task.value
         #expect(snapshot.account?.uid == "fixture-account")
         await waitUntil({ sleeper.pendingCount == 0 }, "the deadline was not cancelled")
+        // Success does not expire the completed request.
+        #expect(transport.count == 1)
         sleeper.fireAll()
     }
 
@@ -287,6 +352,8 @@ struct SamplyBridgeDeadlineTests {
             #expect(error is CancellationError)
         }
         await waitUntil({ sleeper.pendingCount == 0 }, "cancellation did not release the deadline")
+        await waitForInvocation(transport, count: 2)
+        #expect(transport.invocations.map(\.command) == ["snapshot", "cancel"])
     }
 }
 

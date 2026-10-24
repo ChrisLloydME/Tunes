@@ -236,6 +236,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         let stamp = generation
         do {
             let state: WebRuntimeSnapshot = try await call("runtimeSnapshot")
+            try Task.checkCancellation()
             guard generation == stamp else { return false }
             try state.validateVersion()
             if runtimeSnapshot?.account?.uid != state.account?.uid {
@@ -278,6 +279,7 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         let stamp = generation
         do {
             let state: WebSnapshot = try await call("snapshot")
+            try Task.checkCancellation()
             guard generation == stamp else { return false }
             // A newer/different contract must never silently drive the native library.
             try state.validateVersion()
@@ -329,6 +331,10 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         let result: Any?
         do {
             result = try await invoke(command: command, arguments: arguments, operationID: operationID)
+            // A caller can be cancelled after another waiter, deadline, or
+            // WebKit completion settled the invocation. Do not hand a success
+            // to that caller.
+            try Task.checkCancellation()
         } catch {
             let mapped: Error
             if error is CancellationError { mapped = error }
@@ -368,6 +374,11 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
         guard let payload = response.payload else {
             recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .failure)
             throw SamplyError.invalidResponse
+        }
+        if Task.isCancelled {
+            recordInvocation(category, operationID, startedAt, bytes: data.count,
+                             outcome: SamplyDiagnosticOutcome(CancellationError()))
+            throw CancellationError()
         }
         recordInvocation(category, operationID, startedAt, bytes: data.count, outcome: .success)
         return payload
@@ -457,8 +468,21 @@ final class SamplyWebSession: NSObject, WKNavigationDelegate, WKUIDelegate, NSWi
     private func finishInvocation(_ operationID: UInt64, result: Result<Any?, Error>) {
         guard let pending = pendingInvocations.removeValue(forKey: operationID) else { return }
         pending.deadline?.cancel()
-        if case .failure(let error as SamplyBridgeError) = result, error == .timedOut,
-           !isSigningOut {
+        let shouldExpire: Bool
+        switch result {
+        case .failure(let error):
+            // Ordinary caller cancellation gets the same page-side expiry as a
+            // timeout. A cancelled read must not apply its late result after a
+            // newer read has already been accepted.
+            shouldExpire = error is CancellationError ||
+                (error as? SamplyBridgeError) == .timedOut
+        case .success:
+            shouldExpire = false
+        }
+        // Only expire an ID in the document that created it. A replacement
+        // document has its own adapter registry and must never receive an old
+        // document's cancellation.
+        if shouldExpire, pending.generation == generation, !isSigningOut {
             // Tell the page to drop a late result. An already-started router or
             // audio action is not undone or automatically replayed.
             notifySuperseded(operationID)
