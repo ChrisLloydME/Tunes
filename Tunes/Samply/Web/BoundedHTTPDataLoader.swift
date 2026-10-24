@@ -8,6 +8,20 @@ protocol BoundedDataLoading: AnyObject {
     func data(from url: URL, maxBytes: Int) async throws -> Data
 }
 
+/// Test seam for the single terminal MainActor handoff. Production schedules
+/// immediately; fixtures can delay it while inspecting retained bytes.
+@MainActor
+protocol BoundedDataHandoffScheduling: AnyObject {
+    func schedule(_ action: @escaping @MainActor @Sendable () -> Void)
+}
+
+@MainActor
+final class TaskBoundedDataHandoffScheduler: BoundedDataHandoffScheduling {
+    func schedule(_ action: @escaping @MainActor @Sendable () -> Void) {
+        Task { @MainActor in action() }
+    }
+}
+
 @MainActor
 final class BoundedHTTPDataLoader: NSObject, BoundedDataLoading, URLSessionDataDelegate, URLSessionTaskDelegate {
     enum Failure: Error, Equatable {
@@ -17,20 +31,138 @@ final class BoundedHTTPDataLoader: NSObject, BoundedDataLoading, URLSessionDataD
         case notAnImage
     }
 
-    private struct Pending {
+    /// One bounded receive buffer. All capacity checks and appends happen on
+    /// the URLSession delegate path before a single terminal handoff.
+    private final class Transfer: @unchecked Sendable {
         let maxBytes: Int
-        let continuation: CheckedContinuation<Data, Error>
-        var data = Data()
-        var response: HTTPURLResponse?
-        var exceeded = false
+        private let completion: @Sendable (Terminal) -> Void
+        private let lock = NSLock()
+        private var data = Data()
+        private var hasResponse = false
+        private var terminal: Terminal?
+
+        init(maxBytes: Int, completion: @escaping @Sendable (Terminal) -> Void) {
+            self.maxBytes = maxBytes
+            self.completion = completion
+        }
+
+        var retainedBytes: Int { lock.withLock { data.count } }
+
+        /// Returns whether the response may continue. Non-200, non-HTTPS, or a
+        /// Content-Length larger than the bound fails before any body arrives.
+        func receive(_ response: HTTPURLResponse?) -> Bool {
+            var terminalToSend: Terminal?
+            lock.lock()
+            if terminal == nil {
+                hasResponse = true
+                let acceptable = response?.statusCode == 200
+                    && response?.url?.scheme?.lowercased() == "https"
+                if !acceptable {
+                    terminalToSend = Terminal(.failure(Failure.badStatus))
+                } else if let length = response?.value(forHTTPHeaderField: "Content-Length")
+                    .flatMap({ Int($0) }), length > maxBytes {
+                    terminalToSend = Terminal(.failure(Failure.tooLarge))
+                }
+                terminal = terminalToSend
+            }
+            lock.unlock()
+            if let terminalToSend { completion(terminalToSend) }
+            return terminalToSend == nil
+        }
+
+        /// Returns false once this transfer can receive no more data.
+        func append(_ chunk: Data) -> Bool {
+            var terminalToSend: Terminal?
+            var isActive = true
+            lock.lock()
+            if terminal == nil {
+                if chunk.count > maxBytes - data.count {
+                    // Reject before appending, so an oversized chunk never
+                    // contributes to retained response data.
+                    terminalToSend = Terminal(.failure(Failure.tooLarge))
+                    terminal = terminalToSend
+                    isActive = false
+                } else {
+                    data.append(chunk)
+                }
+            } else {
+                isActive = false
+            }
+            lock.unlock()
+            if let terminalToSend { completion(terminalToSend) }
+            return isActive
+        }
+
+        func complete(error: Error?) {
+            var terminalToSend: Terminal?
+            lock.lock()
+            if terminal == nil {
+                if let error {
+                    if (error as? URLError)?.code == .cancelled {
+                        terminalToSend = Terminal(.failure(CancellationError()))
+                    } else {
+                        terminalToSend = Terminal(.failure(error))
+                    }
+                } else if !hasResponse {
+                    terminalToSend = Terminal(.failure(Failure.badStatus))
+                } else {
+                    terminalToSend = Terminal(.success(data))
+                }
+                terminal = terminalToSend
+            }
+            lock.unlock()
+            if let terminalToSend { completion(terminalToSend) }
+        }
+
+        func cancel() {
+            var terminalToSend: Terminal?
+            lock.lock()
+            if terminal == nil {
+                terminalToSend = Terminal(.failure(CancellationError()))
+                terminal = terminalToSend
+            }
+            lock.unlock()
+            if let terminalToSend { completion(terminalToSend) }
+        }
+    }
+
+    private final class Terminal: @unchecked Sendable {
+        let result: Result<Data, Error>
+        init(_ result: Result<Data, Error>) { self.result = result }
+    }
+
+    private final class Registry: @unchecked Sendable {
+        private let lock = NSLock()
+        private var transfers: [Int: Transfer] = [:]
+
+        func insert(_ transfer: Transfer, for taskID: Int) {
+            lock.withLock { transfers[taskID] = transfer }
+        }
+        func transfer(for taskID: Int) -> Transfer? {
+            lock.withLock { transfers[taskID] }
+        }
+        func remove(_ taskID: Int) {
+            _ = lock.withLock { transfers.removeValue(forKey: taskID) }
+        }
+        var retainedByteCount: Int {
+            lock.withLock { transfers.values.reduce(0) { $0 + $1.retainedBytes } }
+        }
+        var count: Int { lock.withLock { transfers.count } }
     }
 
     private let configuration: URLSessionConfiguration
-    private var pending: [Int: Pending] = [:]
+    private let handoffScheduler: any BoundedDataHandoffScheduling
+    private let registry = Registry()
+    private var pending: [Int: CheckedContinuation<Data, Error>] = [:]
     private lazy var session = URLSession(configuration: configuration,
                                          delegate: self, delegateQueue: nil)
 
-    init(protocolClasses: [AnyClass] = []) {
+    /// Retained receive bytes and transfers awaiting the terminal handoff.
+    var retainedByteCount: Int { registry.retainedByteCount }
+    var pendingTransferCount: Int { registry.count }
+
+    init(protocolClasses: [AnyClass] = [],
+         handoffScheduler: (any BoundedDataHandoffScheduling)? = nil) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
@@ -41,6 +173,7 @@ final class BoundedHTTPDataLoader: NSObject, BoundedDataLoading, URLSessionDataD
         configuration.timeoutIntervalForResource = 30
         if !protocolClasses.isEmpty { configuration.protocolClasses = protocolClasses }
         self.configuration = configuration
+        self.handoffScheduler = handoffScheduler ?? TaskBoundedDataHandoffScheduler()
         super.init()
     }
 
@@ -54,19 +187,48 @@ final class BoundedHTTPDataLoader: NSObject, BoundedDataLoading, URLSessionDataD
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("image/*", forHTTPHeaderField: "Accept")
         let task = session.dataTask(with: request)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+        let registry = self.registry
+        let transfer = Transfer(maxBytes: maxBytes) { [weak self] terminal in
+            self?.scheduleHandoff(taskID: task.taskIdentifier, terminal: terminal)
+        }
+        registry.insert(transfer, for: task.taskIdentifier)
+        let data: Data = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Data, Error>) in
                 if Task.isCancelled {
+                    registry.remove(task.taskIdentifier)
                     continuation.resume(throwing: CancellationError())
                     return
                 }
-                pending[task.taskIdentifier] = Pending(maxBytes: maxBytes,
-                                                       continuation: continuation)
+                pending[task.taskIdentifier] = continuation
                 task.resume()
             }
         } onCancel: {
             task.cancel()
+            registry.transfer(for: task.taskIdentifier)?.cancel()
         }
+        // A caller can cancel after the terminal handoff was queued but before
+        // this continuation resumed. Do not hand it a successful result.
+        try Task.checkCancellation()
+        return data
+    }
+
+    private nonisolated func scheduleHandoff(taskID: Int, terminal: Terminal) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.handoffScheduler.schedule { [weak self] in
+                self?.finish(taskIdentifier: taskID, result: terminal.result)
+            }
+        }
+    }
+
+    private func finish(taskIdentifier: Int, result: Result<Data, Error>) {
+        guard let continuation = pending.removeValue(forKey: taskIdentifier) else {
+            registry.remove(taskIdentifier)
+            return
+        }
+        registry.remove(taskIdentifier)
+        continuation.resume(with: result)
     }
 
     // MARK: - URLSession delegate
@@ -84,60 +246,23 @@ final class BoundedHTTPDataLoader: NSObject, BoundedDataLoading, URLSessionDataD
                                 didReceive response: URLResponse,
                                 completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
         let http = response as? HTTPURLResponse
-        Task { @MainActor [weak self] in
-            guard let self, var entry = self.pending[dataTask.taskIdentifier] else {
-                completionHandler(.cancel)
-                return
-            }
-            entry.response = http
-            self.pending[dataTask.taskIdentifier] = entry
-            let acceptable = http?.statusCode == 200
-                && http?.url?.scheme?.lowercased() == "https"
-            if !acceptable { dataTask.cancel() }
-            completionHandler(acceptable ? .allow : .cancel)
+        guard let transfer = registry.transfer(for: dataTask.taskIdentifier) else {
+            completionHandler(.cancel)
+            return
         }
+        let acceptable = transfer.receive(http)
+        if !acceptable { dataTask.cancel() }
+        completionHandler(acceptable ? .allow : .cancel)
     }
 
     nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                                 didReceive data: Data) {
-        Task { @MainActor [weak self] in
-            guard let self, var entry = self.pending[dataTask.taskIdentifier] else { return }
-            entry.data.append(data)
-            if entry.data.count > entry.maxBytes {
-                entry.exceeded = true
-                self.pending[dataTask.taskIdentifier] = entry
-                dataTask.cancel()
-            } else {
-                self.pending[dataTask.taskIdentifier] = entry
-            }
-        }
+        guard let transfer = registry.transfer(for: dataTask.taskIdentifier) else { return }
+        if !transfer.append(data) { dataTask.cancel() }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
                                 didCompleteWithError error: Error?) {
-        Task { @MainActor [weak self] in
-            self?.finish(taskIdentifier: task.taskIdentifier, error: error)
-        }
-    }
-
-    private func finish(taskIdentifier: Int, error: Error?) {
-        guard let entry = pending.removeValue(forKey: taskIdentifier) else { return }
-        if entry.exceeded {
-            entry.continuation.resume(throwing: Failure.tooLarge)
-            return
-        }
-        if let response = entry.response, response.statusCode != 200 {
-            entry.continuation.resume(throwing: Failure.badStatus)
-            return
-        }
-        if let error {
-            if (error as? URLError)?.code == .cancelled {
-                entry.continuation.resume(throwing: CancellationError())
-            } else {
-                entry.continuation.resume(throwing: error)
-            }
-            return
-        }
-        entry.continuation.resume(returning: entry.data)
+        registry.transfer(for: task.taskIdentifier)?.complete(error: error)
     }
 }
